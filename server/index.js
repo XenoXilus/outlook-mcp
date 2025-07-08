@@ -15,7 +15,24 @@ import {
   replyToEmailTool,
   replyAllTool,
   forwardEmailTool,
-  deleteEmailTool
+  deleteEmailTool,
+  // Email Management Tools
+  moveEmailTool,
+  markAsReadTool,
+  flagEmailTool,
+  categorizeEmailTool,
+  archiveEmailTool,
+  batchProcessEmailsTool,
+  // Folder Management Tools
+  listFoldersTool,
+  createFolderTool,
+  renameFolderTool,
+  getFolderStatsTool,
+  // Attachment Tools
+  listAttachmentsTool,
+  downloadAttachmentTool,
+  addAttachmentTool,
+  scanAttachmentsTool
 } from './tools/index.js';
 
 const server = new Server(
@@ -406,6 +423,307 @@ server.setRequestHandler('tools/list', async () => {
           required: ['messageId'],
         },
       },
+      // Email Management Tools
+      {
+        name: 'outlook_move_email',
+        description: 'Move an email to a different folder',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageId: {
+              type: 'string',
+              description: 'The ID of the email to move',
+            },
+            destinationFolderId: {
+              type: 'string',
+              description: 'The ID of the destination folder',
+            },
+          },
+          required: ['messageId', 'destinationFolderId'],
+        },
+      },
+      {
+        name: 'outlook_mark_as_read',
+        description: 'Mark an email as read or unread',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageId: {
+              type: 'string',
+              description: 'The ID of the email to mark',
+            },
+            isRead: {
+              type: 'boolean',
+              description: 'Whether to mark as read (true) or unread (false)',
+              default: true,
+            },
+          },
+          required: ['messageId'],
+        },
+      },
+      {
+        name: 'outlook_flag_email',
+        description: 'Flag or unflag an email for follow-up',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageId: {
+              type: 'string',
+              description: 'The ID of the email to flag',
+            },
+            flagStatus: {
+              type: 'string',
+              enum: ['notFlagged', 'complete', 'flagged'],
+              description: 'The flag status to set',
+              default: 'flagged',
+            },
+          },
+          required: ['messageId'],
+        },
+      },
+      {
+        name: 'outlook_categorize_email',
+        description: 'Apply categories to an email',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageId: {
+              type: 'string',
+              description: 'The ID of the email to categorize',
+            },
+            categories: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'List of category names to apply',
+              default: [],
+            },
+          },
+          required: ['messageId'],
+        },
+      },
+      {
+        name: 'outlook_archive_email',
+        description: 'Archive an email (move to Archive folder)',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageId: {
+              type: 'string',
+              description: 'The ID of the email to archive',
+            },
+          },
+          required: ['messageId'],
+        },
+      },
+      {
+        name: 'outlook_batch_process_emails',
+        description: 'Perform bulk operations on multiple emails',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageIds: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Array of email IDs to process',
+            },
+            operation: {
+              type: 'string',
+              enum: ['markAsRead', 'markAsUnread', 'delete', 'move', 'flag', 'categorize'],
+              description: 'The operation to perform on all emails',
+            },
+            operationData: {
+              type: 'object',
+              description: 'Additional data for the operation (e.g., destinationFolderId for move)',
+              properties: {
+                destinationFolderId: { type: 'string' },
+                flagStatus: { type: 'string' },
+                categories: { type: 'array', items: { type: 'string' } },
+                permanentDelete: { type: 'boolean' },
+              },
+            },
+          },
+          required: ['messageIds', 'operation'],
+        },
+      },
+      // Folder Management Tools
+      {
+        name: 'outlook_list_folders',
+        description: 'List all email folders',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            includeHidden: {
+              type: 'boolean',
+              description: 'Include hidden folders',
+              default: false,
+            },
+            includeChildFolders: {
+              type: 'boolean',
+              description: 'Include nested child folders',
+              default: true,
+            },
+            top: {
+              type: 'number',
+              description: 'Maximum number of folders to return',
+              default: 100,
+            },
+          },
+        },
+      },
+      {
+        name: 'outlook_create_folder',
+        description: 'Create a new email folder',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            displayName: {
+              type: 'string',
+              description: 'Name of the new folder',
+            },
+            parentFolderId: {
+              type: 'string',
+              description: 'ID of parent folder (optional, creates at root level if not specified)',
+            },
+          },
+          required: ['displayName'],
+        },
+      },
+      {
+        name: 'outlook_rename_folder',
+        description: 'Rename an existing email folder',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            folderId: {
+              type: 'string',
+              description: 'ID of the folder to rename',
+            },
+            newDisplayName: {
+              type: 'string',
+              description: 'New name for the folder',
+            },
+          },
+          required: ['folderId', 'newDisplayName'],
+        },
+      },
+      {
+        name: 'outlook_get_folder_stats',
+        description: 'Get statistics for a specific folder',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            folderId: {
+              type: 'string',
+              description: 'ID of the folder to get stats for',
+            },
+            includeSubfolders: {
+              type: 'boolean',
+              description: 'Include statistics for subfolders',
+              default: true,
+            },
+          },
+          required: ['folderId'],
+        },
+      },
+      // Attachment Tools
+      {
+        name: 'outlook_list_attachments',
+        description: 'List all attachments for a specific email',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageId: {
+              type: 'string',
+              description: 'The ID of the email to list attachments for',
+            },
+          },
+          required: ['messageId'],
+        },
+      },
+      {
+        name: 'outlook_download_attachment',
+        description: 'Download a specific email attachment',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageId: {
+              type: 'string',
+              description: 'The ID of the email containing the attachment',
+            },
+            attachmentId: {
+              type: 'string',
+              description: 'The ID of the attachment to download',
+            },
+            includeContent: {
+              type: 'boolean',
+              description: 'Whether to include the base64-encoded file content',
+              default: false,
+            },
+          },
+          required: ['messageId', 'attachmentId'],
+        },
+      },
+      {
+        name: 'outlook_add_attachment',
+        description: 'Add an attachment to an email draft',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            messageId: {
+              type: 'string',
+              description: 'The ID of the email (draft) to add attachment to',
+            },
+            name: {
+              type: 'string',
+              description: 'Name of the attachment file',
+            },
+            contentType: {
+              type: 'string',
+              description: 'MIME type of the attachment',
+            },
+            contentBytes: {
+              type: 'string',
+              description: 'Base64-encoded content of the attachment',
+            },
+          },
+          required: ['messageId', 'name', 'contentType', 'contentBytes'],
+        },
+      },
+      {
+        name: 'outlook_scan_attachments',
+        description: 'Scan emails for large or suspicious attachments',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            folder: {
+              type: 'string',
+              description: 'Folder to scan (default: inbox)',
+              default: 'inbox',
+            },
+            maxSizeMB: {
+              type: 'number',
+              description: 'Maximum attachment size in MB to flag as large',
+              default: 10,
+            },
+            suspiciousTypes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'File extensions to flag as suspicious',
+              default: ['exe', 'bat', 'cmd', 'scr', 'vbs', 'js'],
+            },
+            limit: {
+              type: 'number',
+              description: 'Maximum number of emails to scan',
+              default: 100,
+            },
+            daysBack: {
+              type: 'number',
+              description: 'How many days back to scan',
+              default: 30,
+            },
+          },
+        },
+      },
     ],
   };
 });
@@ -450,6 +768,51 @@ server.setRequestHandler('tools/call', async (request) => {
       
       case 'outlook_delete_email':
         return await deleteEmailTool(authManager, args);
+      
+      // Email Management Tools
+      case 'outlook_move_email':
+        return await moveEmailTool(authManager, args);
+      
+      case 'outlook_mark_as_read':
+        return await markAsReadTool(authManager, args);
+      
+      case 'outlook_flag_email':
+        return await flagEmailTool(authManager, args);
+      
+      case 'outlook_categorize_email':
+        return await categorizeEmailTool(authManager, args);
+      
+      case 'outlook_archive_email':
+        return await archiveEmailTool(authManager, args);
+      
+      case 'outlook_batch_process_emails':
+        return await batchProcessEmailsTool(authManager, args);
+      
+      // Folder Management Tools
+      case 'outlook_list_folders':
+        return await listFoldersTool(authManager, args);
+      
+      case 'outlook_create_folder':
+        return await createFolderTool(authManager, args);
+      
+      case 'outlook_rename_folder':
+        return await renameFolderTool(authManager, args);
+      
+      case 'outlook_get_folder_stats':
+        return await getFolderStatsTool(authManager, args);
+      
+      // Attachment Tools
+      case 'outlook_list_attachments':
+        return await listAttachmentsTool(authManager, args);
+      
+      case 'outlook_download_attachment':
+        return await downloadAttachmentTool(authManager, args);
+      
+      case 'outlook_add_attachment':
+        return await addAttachmentTool(authManager, args);
+      
+      case 'outlook_scan_attachments':
+        return await scanAttachmentsTool(authManager, args);
       
       default:
         throw new Error(`Unknown tool: ${name}`);

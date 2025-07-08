@@ -2025,3 +2025,728 @@ export async function resetRateLimitMetricsTool(authManager, args) {
     throw new Error(`Failed to reset rate limit metrics: ${error.message}`);
   }
 }
+
+// Email Management Tools
+
+export async function moveEmailTool(authManager, args) {
+  const { messageId, destinationFolderId } = args;
+
+  if (!messageId) {
+    throw new Error('messageId is required');
+  }
+
+  if (!destinationFolderId) {
+    throw new Error('destinationFolderId is required');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    const result = await graphApiClient.postWithRetry(`/me/messages/${messageId}/move`, {
+      destinationId: destinationFolderId
+    });
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Email moved successfully. New Message ID: ${result.id}`,
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to move email: ${error.message}`);
+  }
+}
+
+export async function markAsReadTool(authManager, args) {
+  const { messageId, isRead = true } = args;
+
+  if (!messageId) {
+    throw new Error('messageId is required');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    await graphApiClient.makeRequest(`/me/messages/${messageId}`, {
+      isRead: isRead
+    }, 'PATCH');
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Email ${isRead ? 'marked as read' : 'marked as unread'} successfully. Message ID: ${messageId}`,
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to mark email as ${isRead ? 'read' : 'unread'}: ${error.message}`);
+  }
+}
+
+export async function flagEmailTool(authManager, args) {
+  const { messageId, flagStatus = 'flagged' } = args;
+
+  if (!messageId) {
+    throw new Error('messageId is required');
+  }
+
+  if (!['notFlagged', 'complete', 'flagged'].includes(flagStatus)) {
+    throw new Error('flagStatus must be one of: notFlagged, complete, flagged');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    await graphApiClient.makeRequest(`/me/messages/${messageId}`, {
+      flag: {
+        flagStatus: flagStatus
+      }
+    }, 'PATCH');
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Email flag status set to '${flagStatus}' successfully. Message ID: ${messageId}`,
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to flag email: ${error.message}`);
+  }
+}
+
+export async function categorizeEmailTool(authManager, args) {
+  const { messageId, categories = [] } = args;
+
+  if (!messageId) {
+    throw new Error('messageId is required');
+  }
+
+  if (!Array.isArray(categories)) {
+    throw new Error('categories must be an array');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    await graphApiClient.makeRequest(`/me/messages/${messageId}`, {
+      categories: categories
+    }, 'PATCH');
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Email categories updated successfully. Message ID: ${messageId}, Categories: ${categories.join(', ') || 'None'}`,
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to categorize email: ${error.message}`);
+  }
+}
+
+export async function archiveEmailTool(authManager, args) {
+  const { messageId } = args;
+
+  if (!messageId) {
+    throw new Error('messageId is required');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    // First try to find the Archive folder
+    const foldersResult = await graphApiClient.makeRequest('/me/mailFolders', {
+      filter: "displayName eq 'Archive'"
+    });
+    
+    let archiveFolderId = 'archive'; // Default fallback
+    if (foldersResult.value && foldersResult.value.length > 0) {
+      archiveFolderId = foldersResult.value[0].id;
+    }
+
+    // Move the message to Archive
+    const result = await graphApiClient.postWithRetry(`/me/messages/${messageId}/move`, {
+      destinationId: archiveFolderId
+    });
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Email archived successfully. New Message ID: ${result.id}`,
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to archive email: ${error.message}`);
+  }
+}
+
+export async function batchProcessEmailsTool(authManager, args) {
+  const { messageIds, operation, operationData = {} } = args;
+
+  if (!messageIds || !Array.isArray(messageIds) || messageIds.length === 0) {
+    throw new Error('messageIds array is required and must not be empty');
+  }
+
+  if (!operation) {
+    throw new Error('operation is required');
+  }
+
+  const validOperations = ['markAsRead', 'markAsUnread', 'delete', 'move', 'flag', 'categorize'];
+  if (!validOperations.includes(operation)) {
+    throw new Error(`operation must be one of: ${validOperations.join(', ')}`);
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    const results = [];
+    const errors = [];
+
+    // Process each message (could be optimized with batch requests in the future)
+    for (const messageId of messageIds) {
+      try {
+        let result;
+        
+        switch (operation) {
+          case 'markAsRead':
+            await graphApiClient.makeRequest(`/me/messages/${messageId}`, { isRead: true }, 'PATCH');
+            result = { messageId, status: 'success', operation: 'marked as read' };
+            break;
+            
+          case 'markAsUnread':
+            await graphApiClient.makeRequest(`/me/messages/${messageId}`, { isRead: false }, 'PATCH');
+            result = { messageId, status: 'success', operation: 'marked as unread' };
+            break;
+            
+          case 'delete':
+            if (operationData.permanentDelete) {
+              await graphApiClient.makeRequest(`/me/messages/${messageId}`, {}, 'DELETE');
+              result = { messageId, status: 'success', operation: 'permanently deleted' };
+            } else {
+              // Find Deleted Items folder
+              const foldersResult = await graphApiClient.makeRequest('/me/mailFolders', {
+                filter: "displayName eq 'Deleted Items'"
+              });
+              let deletedItemsFolderId = 'deleteditems';
+              if (foldersResult.value && foldersResult.value.length > 0) {
+                deletedItemsFolderId = foldersResult.value[0].id;
+              }
+              await graphApiClient.postWithRetry(`/me/messages/${messageId}/move`, {
+                destinationId: deletedItemsFolderId
+              });
+              result = { messageId, status: 'success', operation: 'moved to deleted items' };
+            }
+            break;
+            
+          case 'move':
+            if (!operationData.destinationFolderId) {
+              throw new Error('destinationFolderId is required for move operation');
+            }
+            await graphApiClient.postWithRetry(`/me/messages/${messageId}/move`, {
+              destinationId: operationData.destinationFolderId
+            });
+            result = { messageId, status: 'success', operation: `moved to folder ${operationData.destinationFolderId}` };
+            break;
+            
+          case 'flag':
+            const flagStatus = operationData.flagStatus || 'flagged';
+            await graphApiClient.makeRequest(`/me/messages/${messageId}`, {
+              flag: { flagStatus }
+            }, 'PATCH');
+            result = { messageId, status: 'success', operation: `flagged as ${flagStatus}` };
+            break;
+            
+          case 'categorize':
+            const categories = operationData.categories || [];
+            await graphApiClient.makeRequest(`/me/messages/${messageId}`, {
+              categories
+            }, 'PATCH');
+            result = { messageId, status: 'success', operation: `categorized as ${categories.join(', ')}` };
+            break;
+        }
+        
+        results.push(result);
+      } catch (error) {
+        errors.push({ messageId, error: error.message });
+      }
+    }
+
+    const summary = {
+      totalProcessed: messageIds.length,
+      successful: results.length,
+      failed: errors.length,
+      operation,
+      results,
+      errors
+    };
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(summary, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to batch process emails: ${error.message}`);
+  }
+}
+
+// Folder Management Tools
+
+export async function listFoldersTool(authManager, args) {
+  const { includeHidden = false, includeChildFolders = true, top = 100 } = args;
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    const options = {
+      select: 'id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount,isHidden',
+      top: Math.min(top, 1000)
+    };
+
+    if (!includeHidden) {
+      options.filter = 'isHidden eq false';
+    }
+
+    let endpoint = '/me/mailFolders';
+    if (includeChildFolders) {
+      endpoint = '/me/mailFolders?includeNestedFolders=true';
+    }
+
+    const result = await graphApiClient.makeRequest(endpoint, options);
+
+    const folders = result.value?.map(folder => ({
+      id: folder.id,
+      name: folder.displayName,
+      parentFolderId: folder.parentFolderId,
+      childFolderCount: folder.childFolderCount || 0,
+      unreadItemCount: folder.unreadItemCount || 0,
+      totalItemCount: folder.totalItemCount || 0,
+      isHidden: folder.isHidden || false
+    })) || [];
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            folders,
+            totalCount: folders.length,
+            includesHidden: includeHidden,
+            includesChildFolders: includeChildFolders
+          }, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to list folders: ${error.message}`);
+  }
+}
+
+export async function createFolderTool(authManager, args) {
+  const { displayName, parentFolderId } = args;
+
+  if (!displayName) {
+    throw new Error('displayName is required');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    const folderData = {
+      displayName: displayName
+    };
+
+    let endpoint = '/me/mailFolders';
+    if (parentFolderId) {
+      endpoint = `/me/mailFolders/${parentFolderId}/childFolders`;
+    }
+
+    const result = await graphApiClient.postWithRetry(endpoint, folderData);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Folder "${displayName}" created successfully. Folder ID: ${result.id}`,
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to create folder: ${error.message}`);
+  }
+}
+
+export async function renameFolderTool(authManager, args) {
+  const { folderId, newDisplayName } = args;
+
+  if (!folderId) {
+    throw new Error('folderId is required');
+  }
+
+  if (!newDisplayName) {
+    throw new Error('newDisplayName is required');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    await graphApiClient.makeRequest(`/me/mailFolders/${folderId}`, {
+      displayName: newDisplayName
+    }, 'PATCH');
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Folder renamed to "${newDisplayName}" successfully. Folder ID: ${folderId}`,
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to rename folder: ${error.message}`);
+  }
+}
+
+export async function getFolderStatsTool(authManager, args) {
+  const { folderId, includeSubfolders = true } = args;
+
+  if (!folderId) {
+    throw new Error('folderId is required');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    // Get folder details
+    const folder = await graphApiClient.makeRequest(`/me/mailFolders/${folderId}`, {
+      select: 'id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount,isHidden'
+    });
+
+    const stats = {
+      id: folder.id,
+      name: folder.displayName,
+      totalItems: folder.totalItemCount || 0,
+      unreadItems: folder.unreadItemCount || 0,
+      readItems: (folder.totalItemCount || 0) - (folder.unreadItemCount || 0),
+      childFolders: folder.childFolderCount || 0,
+      isHidden: folder.isHidden || false,
+      parentFolderId: folder.parentFolderId
+    };
+
+    // Get subfolder stats if requested
+    if (includeSubfolders && stats.childFolders > 0) {
+      try {
+        const childFolders = await graphApiClient.makeRequest(`/me/mailFolders/${folderId}/childFolders`, {
+          select: 'id,displayName,childFolderCount,unreadItemCount,totalItemCount'
+        });
+
+        stats.subfolders = childFolders.value?.map(subfolder => ({
+          id: subfolder.id,
+          name: subfolder.displayName,
+          totalItems: subfolder.totalItemCount || 0,
+          unreadItems: subfolder.unreadItemCount || 0,
+          childFolders: subfolder.childFolderCount || 0
+        })) || [];
+
+        // Calculate totals including subfolders
+        stats.totalItemsIncludingSubfolders = stats.totalItems + 
+          stats.subfolders.reduce((sum, sf) => sum + sf.totalItems, 0);
+        stats.unreadItemsIncludingSubfolders = stats.unreadItems + 
+          stats.subfolders.reduce((sum, sf) => sum + sf.unreadItems, 0);
+      } catch (error) {
+        stats.subfolderError = `Could not fetch subfolder stats: ${error.message}`;
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(stats, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to get folder stats: ${error.message}`);
+  }
+}
+
+// Attachment Tools
+
+export async function listAttachmentsTool(authManager, args) {
+  const { messageId } = args;
+
+  if (!messageId) {
+    throw new Error('messageId is required');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    const result = await graphApiClient.makeRequest(`/me/messages/${messageId}/attachments`, {
+      select: 'id,name,contentType,size,isInline,lastModifiedDateTime'
+    });
+
+    const attachments = result.value?.map(attachment => ({
+      id: attachment.id,
+      name: attachment.name,
+      contentType: attachment.contentType,
+      size: attachment.size,
+      sizeFormatted: formatFileSize(attachment.size),
+      isInline: attachment.isInline || false,
+      lastModifiedDateTime: attachment.lastModifiedDateTime
+    })) || [];
+
+    const summary = {
+      messageId,
+      totalAttachments: attachments.length,
+      totalSize: attachments.reduce((sum, att) => sum + (att.size || 0), 0),
+      attachments
+    };
+
+    summary.totalSizeFormatted = formatFileSize(summary.totalSize);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(summary, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to list attachments: ${error.message}`);
+  }
+}
+
+export async function downloadAttachmentTool(authManager, args) {
+  const { messageId, attachmentId, includeContent = false } = args;
+
+  if (!messageId) {
+    throw new Error('messageId is required');
+  }
+
+  if (!attachmentId) {
+    throw new Error('attachmentId is required');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    const selectFields = includeContent 
+      ? 'id,name,contentType,size,contentBytes,isInline,lastModifiedDateTime'
+      : 'id,name,contentType,size,isInline,lastModifiedDateTime';
+
+    const attachment = await graphApiClient.makeRequest(`/me/messages/${messageId}/attachments/${attachmentId}`, {
+      select: selectFields
+    });
+
+    const attachmentInfo = {
+      id: attachment.id,
+      name: attachment.name,
+      contentType: attachment.contentType,
+      size: attachment.size,
+      sizeFormatted: formatFileSize(attachment.size),
+      isInline: attachment.isInline || false,
+      lastModifiedDateTime: attachment.lastModifiedDateTime
+    };
+
+    if (includeContent && attachment.contentBytes) {
+      attachmentInfo.contentBytes = attachment.contentBytes;
+      attachmentInfo.note = 'Content is base64 encoded. Decode before saving to file.';
+    } else {
+      attachmentInfo.note = 'Content not included. Set includeContent=true to retrieve file content.';
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(attachmentInfo, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to download attachment: ${error.message}`);
+  }
+}
+
+export async function addAttachmentTool(authManager, args) {
+  const { messageId, name, contentType, contentBytes } = args;
+
+  if (!messageId) {
+    throw new Error('messageId is required');
+  }
+
+  if (!name) {
+    throw new Error('name is required');
+  }
+
+  if (!contentType) {
+    throw new Error('contentType is required');
+  }
+
+  if (!contentBytes) {
+    throw new Error('contentBytes is required (base64 encoded)');
+  }
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    const attachmentData = {
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: name,
+      contentType: contentType,
+      contentBytes: contentBytes
+    };
+
+    const result = await graphApiClient.postWithRetry(`/me/messages/${messageId}/attachments`, attachmentData);
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Attachment "${name}" added successfully. Attachment ID: ${result.id}`,
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to add attachment: ${error.message}`);
+  }
+}
+
+export async function scanAttachmentsTool(authManager, args) {
+  const { 
+    folder = 'inbox', 
+    maxSizeMB = 10, 
+    suspiciousTypes = ['exe', 'bat', 'cmd', 'scr', 'vbs', 'js'],
+    limit = 100,
+    daysBack = 30
+  } = args;
+
+  try {
+    await authManager.ensureAuthenticated();
+    const graphApiClient = authManager.getGraphApiClient();
+
+    // Calculate date filter
+    const sinceDate = new Date();
+    sinceDate.setDate(sinceDate.getDate() - daysBack);
+
+    const options = {
+      select: 'id,subject,from,receivedDateTime,hasAttachments',
+      filter: `hasAttachments eq true and receivedDateTime ge ${sinceDate.toISOString()}`,
+      top: Math.min(limit, 1000),
+      orderby: 'receivedDateTime desc'
+    };
+
+    const emailsResult = await graphApiClient.makeRequest(`/me/mailFolders/${folder}/messages`, options);
+
+    const suspiciousEmails = [];
+    const largeAttachments = [];
+    const scanSummary = {
+      totalEmailsScanned: emailsResult.value?.length || 0,
+      suspiciousAttachments: 0,
+      largeAttachments: 0,
+      maxSizeMB: maxSizeMB,
+      suspiciousFileTypes: suspiciousTypes
+    };
+
+    // Scan each email's attachments
+    for (const email of emailsResult.value || []) {
+      try {
+        const attachmentsResult = await graphApiClient.makeRequest(`/me/messages/${email.id}/attachments`, {
+          select: 'id,name,contentType,size'
+        });
+
+        for (const attachment of attachmentsResult.value || []) {
+          const sizeMB = (attachment.size || 0) / (1024 * 1024);
+          const fileExtension = attachment.name?.split('.').pop()?.toLowerCase() || '';
+
+          // Check for large attachments
+          if (sizeMB > maxSizeMB) {
+            largeAttachments.push({
+              emailId: email.id,
+              emailSubject: email.subject,
+              emailFrom: email.from?.emailAddress?.address,
+              attachmentId: attachment.id,
+              attachmentName: attachment.name,
+              sizeMB: Math.round(sizeMB * 100) / 100,
+              contentType: attachment.contentType
+            });
+            scanSummary.largeAttachments++;
+          }
+
+          // Check for suspicious file types
+          if (suspiciousTypes.includes(fileExtension)) {
+            suspiciousEmails.push({
+              emailId: email.id,
+              emailSubject: email.subject,
+              emailFrom: email.from?.emailAddress?.address,
+              attachmentId: attachment.id,
+              attachmentName: attachment.name,
+              fileExtension: fileExtension,
+              sizeMB: Math.round(sizeMB * 100) / 100,
+              risk: 'Potentially executable file type'
+            });
+            scanSummary.suspiciousAttachments++;
+          }
+        }
+      } catch (error) {
+        // Skip emails where we can't access attachments
+        continue;
+      }
+    }
+
+    const scanResults = {
+      scanSummary,
+      largeAttachments,
+      suspiciousEmails,
+      scannedAt: new Date().toISOString(),
+      folder: folder
+    };
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(scanResults, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(`Failed to scan attachments: ${error.message}`);
+  }
+}
+
+// Helper function for file size formatting
+function formatFileSize(bytes) {
+  if (!bytes) return '0 Bytes';
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  if (bytes === 0) return '0 Bytes';
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
+}
