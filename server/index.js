@@ -151,7 +151,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'outlook_create_event',
-        description: 'Create a new calendar event in Outlook',
+        description: 'Create a new calendar event in Outlook with optional Teams meeting integration',
         inputSchema: {
           type: 'object',
           properties: {
@@ -199,6 +199,96 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'array',
               items: { type: 'string' },
               description: 'Attendee email addresses',
+            },
+            isOnlineMeeting: {
+              type: 'boolean',
+              description: 'Whether to create this as a Teams meeting (default: false)',
+            },
+            onlineMeetingProvider: {
+              type: 'string',
+              enum: ['teamsForBusiness', 'skypeForBusiness'],
+              description: 'Online meeting provider (default: "teamsForBusiness")',
+            },
+            recurrence: {
+              type: 'object',
+              description: 'Recurrence pattern for recurring meetings',
+              properties: {
+                pattern: {
+                  type: 'object',
+                  description: 'The recurrence pattern',
+                  properties: {
+                    type: {
+                      type: 'string',
+                      enum: ['daily', 'weekly', 'absoluteMonthly', 'relativeMonthly', 'absoluteYearly', 'relativeYearly'],
+                      description: 'The recurrence pattern type',
+                    },
+                    interval: {
+                      type: 'integer',
+                      minimum: 1,
+                      description: 'Number of units between occurrences',
+                    },
+                    daysOfWeek: {
+                      type: 'array',
+                      items: {
+                        type: 'string',
+                        enum: ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
+                      },
+                      description: 'Days of the week (required for weekly, relativeMonthly, relativeYearly)',
+                    },
+                    dayOfMonth: {
+                      type: 'integer',
+                      minimum: 1,
+                      maximum: 31,
+                      description: 'Day of the month (required for absoluteMonthly, absoluteYearly)',
+                    },
+                    month: {
+                      type: 'integer',
+                      minimum: 1,
+                      maximum: 12,
+                      description: 'Month of the year (required for absoluteYearly, relativeYearly)',
+                    },
+                    index: {
+                      type: 'string',
+                      enum: ['first', 'second', 'third', 'fourth', 'last'],
+                      description: 'Instance of the allowed days (for relativeMonthly, relativeYearly)',
+                    },
+                    firstDayOfWeek: {
+                      type: 'string',
+                      enum: ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
+                      description: 'First day of the week (for weekly patterns, default: sunday)',
+                    },
+                  },
+                  required: ['type', 'interval'],
+                },
+                range: {
+                  type: 'object',
+                  description: 'The recurrence range',
+                  properties: {
+                    type: {
+                      type: 'string',
+                      enum: ['numbered', 'endDate', 'noEnd'],
+                      description: 'The recurrence range type',
+                    },
+                    startDate: {
+                      type: 'string',
+                      format: 'date',
+                      description: 'Start date of the recurrence (YYYY-MM-DD)',
+                    },
+                    endDate: {
+                      type: 'string',
+                      format: 'date',
+                      description: 'End date of the recurrence (YYYY-MM-DD, required for endDate type)',
+                    },
+                    numberOfOccurrences: {
+                      type: 'integer',
+                      minimum: 1,
+                      description: 'Number of occurrences (required for numbered type)',
+                    },
+                  },
+                  required: ['type', 'startDate'],
+                },
+              },
+              required: ['pattern', 'range'],
             },
           },
           required: ['subject', 'start', 'end'],

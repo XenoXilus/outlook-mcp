@@ -223,7 +223,7 @@ export async function listEventsTool(authManager, args) {
 }
 
 export async function createEventTool(authManager, args) {
-  const { subject, start, end, body = '', location = '', attendees = [] } = args;
+  const { subject, start, end, body = '', location = '', attendees = [], isOnlineMeeting = false, onlineMeetingProvider = 'teamsForBusiness', recurrence } = args;
 
   try {
     await authManager.ensureAuthenticated();
@@ -252,13 +252,31 @@ export async function createEventTool(authManager, args) {
       }));
     }
 
+    // Add Teams meeting support
+    if (isOnlineMeeting) {
+      event.isOnlineMeeting = true;
+      event.onlineMeetingProvider = onlineMeetingProvider;
+    }
+
+    // Add recurrence support
+    if (recurrence) {
+      event.recurrence = recurrence;
+    }
+
     const result = await graphApiClient.postWithRetry('/me/events', event);
+
+    const isRecurring = recurrence ? true : false;
+    const meetingType = isOnlineMeeting ? 'Teams meeting' : 'Event';
+    const recurrenceInfo = isRecurring ? ' (recurring)' : '';
+    
+    const successMessage = `${meetingType} "${subject}"${recurrenceInfo} created successfully. Event ID: ${result.id}` +
+      (isOnlineMeeting && result.onlineMeeting?.joinUrl ? ` Join URL: ${result.onlineMeeting.joinUrl}` : '');
 
     return {
       content: [
         {
           type: 'text',
-          text: `Event "${subject}" created successfully. Event ID: ${result.id}`,
+          text: successMessage,
         },
       ],
     };
