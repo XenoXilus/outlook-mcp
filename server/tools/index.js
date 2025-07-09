@@ -2777,9 +2777,7 @@ export async function downloadAttachmentTool(authManager, args) {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
 
-    const selectFields = includeContent 
-      ? 'id,name,contentType,size,contentBytes,isInline,lastModifiedDateTime'
-      : 'id,name,contentType,size,isInline,lastModifiedDateTime';
+    const selectFields = 'id,name,contentType,size,isInline,lastModifiedDateTime';
 
     const attachment = await graphApiClient.makeRequest(`/me/messages/${messageId}/attachments/${attachmentId}`, {
       select: selectFields
@@ -2795,9 +2793,21 @@ export async function downloadAttachmentTool(authManager, args) {
       lastModifiedDateTime: attachment.lastModifiedDateTime
     };
 
-    if (includeContent && attachment.contentBytes) {
-      attachmentInfo.contentBytes = attachment.contentBytes;
-      attachmentInfo.note = 'Content is base64 encoded. Decode before saving to file.';
+    if (includeContent) {
+      // Only FileAttachment has contentBytes, cast to FileAttachment type
+      try {
+        const attachmentWithContent = await graphApiClient.makeRequest(`/me/messages/${messageId}/attachments/${attachmentId}/microsoft.graph.fileAttachment`, {
+          select: 'contentBytes'
+        });
+        if (attachmentWithContent.contentBytes) {
+          attachmentInfo.contentBytes = attachmentWithContent.contentBytes;
+          attachmentInfo.note = 'Content is base64 encoded. Decode before saving to file.';
+        } else {
+          attachmentInfo.note = 'Content not available for this attachment type (only FileAttachment supports content download).';
+        }
+      } catch (contentError) {
+        attachmentInfo.note = 'Content not available for this attachment type (only FileAttachment supports content download).';
+      }
     } else {
       attachmentInfo.note = 'Content not included. Set includeContent=true to retrieve file content.';
     }
