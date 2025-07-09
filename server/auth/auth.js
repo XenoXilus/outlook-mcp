@@ -37,9 +37,7 @@ export class OutlookAuthManager {
 
     exec(command, (error) => {
       if (error) {
-        console.log(`Could not open browser automatically. Please manually visit: ${url}`);
-      } else {
-        console.log('Browser opened automatically for authentication');
+        // Silent fail - URL is already displayed above
       }
     });
   }
@@ -100,8 +98,11 @@ export class OutlookAuthManager {
       authUrl.searchParams.append('state', state);
       authUrl.searchParams.append('code_challenge', codeChallenge);
       authUrl.searchParams.append('code_challenge_method', 'S256');
+      authUrl.searchParams.append('prompt', 'select_account');
 
-      console.log(`Please visit: ${authUrl.toString()}`);
+      console.log(`\nOpening your browser for Microsoft account selection...`);
+      console.log(`If the browser doesn't open automatically, please visit:`);
+      console.log(authUrl.toString());
       
       // Attempt to open the browser automatically
       this.openBrowser(authUrl.toString());
@@ -123,7 +124,22 @@ export class OutlookAuthManager {
 
           if (code) {
             res.writeHead(200, { 'Content-Type': 'text/html' });
-            res.end('<h1>Authentication successful!</h1><p>You can close this window.</p>');
+            res.end(`
+              <html>
+                <head>
+                  <title>Authentication Successful</title>
+                  <style>
+                    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                    h1 { color: #0078d4; }
+                  </style>
+                </head>
+                <body>
+                  <h1>Authentication Successful!</h1>
+                  <p>You can now close this window and return to your terminal.</p>
+                  <p>The Outlook MCP server is being configured with your selected account.</p>
+                </body>
+              </html>
+            `);
             server.close();
             resolve(code);
           } else {
@@ -136,7 +152,7 @@ export class OutlookAuthManager {
       });
 
       server.listen(8080, () => {
-        console.log('Listening for OAuth callback on http://localhost:8080');
+        console.log('\nWaiting for authentication callback...');
       });
 
       setTimeout(() => {

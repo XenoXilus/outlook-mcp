@@ -70,28 +70,6 @@ function cleanupExpiredCache() {
 // Run cleanup every 10 minutes
 setInterval(cleanupExpiredCache, 10 * 60 * 1000);
 
-export async function authenticateTool(authManager) {
-  const result = await authManager.authenticate();
-  
-  if (result.success) {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Successfully authenticated as ${result.user.displayName} (${result.user.mail})`,
-        },
-      ],
-    };
-  } else {
-    return {
-      error: {
-        code: 'AUTH_FAILED',
-        message: result.error,
-      },
-    };
-  }
-}
-
 export async function listEmailsTool(authManager, args) {
   const { folder = 'inbox', limit = 10, filter } = args;
 

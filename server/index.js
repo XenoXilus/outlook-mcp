@@ -6,7 +6,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { OutlookAuthManager } from './auth/auth.js';
 import { 
-  authenticateTool,
   listEmailsTool,
   sendEmailTool,
   listEventsTool,
@@ -57,14 +56,6 @@ const authManager = new OutlookAuthManager(
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
-      {
-        name: 'outlook_authenticate',
-        description: 'Authenticate with Microsoft Outlook using OAuth 2.0',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
       {
         name: 'outlook_list_emails',
         description: 'List emails from Outlook inbox or specified folder',
@@ -739,9 +730,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
-      case 'outlook_authenticate':
-        return await authenticateTool(authManager);
-      
       case 'outlook_list_emails':
         return await listEmailsTool(authManager, args);
       
@@ -841,9 +829,31 @@ async function main() {
     process.exit(1);
   }
 
+  console.error('Starting Outlook MCP Server...');
+  console.error('Authenticating with Microsoft Office 365...');
+  console.error('You will be prompted to select or add an Office 365 account.');
+  
+  try {
+    const authResult = await authManager.authenticate();
+    
+    if (!authResult.success) {
+      console.error('\nAuthentication failed:', authResult.error || 'Unknown error');
+      console.error('Please disconnect and reconnect this MCP server to try again.');
+      process.exit(1);
+    }
+    
+    console.error(`\nSuccessfully authenticated as: ${authResult.user.mail || authResult.user.displayName}`);
+    console.error('To use a different account, disconnect and reconnect this MCP server.\n');
+    
+  } catch (error) {
+    console.error('\nAuthentication error:', error.message);
+    console.error('Please disconnect and reconnect this MCP server to try again.');
+    process.exit(1);
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('Outlook MCP server started with secure token management');
+  console.error('Outlook MCP server is ready');
 }
 
 main().catch((error) => {
