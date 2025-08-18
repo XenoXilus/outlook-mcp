@@ -16,7 +16,12 @@ export const authConfig = {
       'Tasks.ReadWrite',
       'User.Read',
       'MailboxSettings.Read',
-      'offline_access', // Required for refresh tokens
+      // SharePoint and OneDrive access
+      'Sites.Read.All',         // Read all SharePoint sites
+      'Sites.ReadWrite.All',    // Read/write all SharePoint sites
+      'Files.Read.All',         // Read all files user can access
+      'Files.ReadWrite.All',    // Read/write all files user can access
+      'offline_access',         // Required for refresh tokens
     ].join(' '),
     redirectUri: 'http://localhost:8080/callback',
   },

@@ -1,6 +1,7 @@
 import { Client } from '@microsoft/microsoft-graph-client';
 import { authConfig } from '../auth/config.js';
 import { convertErrorToToolError, createServiceUnavailableError, createRateLimitError, createValidationError } from '../utils/mcpErrorResponse.js';
+import { FolderResolver } from './folderResolver.js';
 
 export class GraphApiClient {
   constructor(authManager) {
@@ -10,6 +11,7 @@ export class GraphApiClient {
     this.requestWindow = [];
     this.maxConcurrentRequests = 4; // Per mailbox limit from Graph API
     this.activeRequests = 0;
+    this.folderResolver = null; // Will be initialized when needed
     
     // Rate limiting and monitoring metrics
     this.rateLimitMetrics = {
@@ -422,6 +424,14 @@ export class GraphApiClient {
   isRetryableError(statusCode) {
     // Define which errors are retryable
     return [401, 429, 500, 502, 503, 504].includes(statusCode);
+  }
+
+  // Get FolderResolver instance (lazy initialization)
+  getFolderResolver() {
+    if (!this.folderResolver) {
+      this.folderResolver = new FolderResolver(this);
+    }
+    return this.folderResolver;
   }
 
   // Utility methods for common operations

@@ -580,10 +580,21 @@ export const graphHelpers = {
 
     // Format file size for display
     formatFileSize(bytes) {
+      // Handle null, undefined, or invalid byte values
+      if (bytes === null || bytes === undefined || isNaN(bytes) || typeof bytes !== 'number') {
+        return 'Unknown size';
+      }
+      
       const sizes = ['Bytes', 'KB', 'MB', 'GB'];
       if (bytes === 0) return '0 Bytes';
-      const i = Math.floor(Math.log(bytes) / Math.log(1024));
-      return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
+      
+      // Ensure bytes is a positive number
+      const absBytes = Math.abs(bytes);
+      const i = Math.floor(Math.log(absBytes) / Math.log(1024));
+      const sizeIndex = Math.min(i, sizes.length - 1); // Cap at largest unit
+      
+      const value = Math.round(absBytes / Math.pow(1024, sizeIndex) * 100) / 100;
+      return value + ' ' + sizes[sizeIndex];
     },
   },
 };

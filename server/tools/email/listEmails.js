@@ -7,6 +7,15 @@ export async function listEmailsTool(authManager, args) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const folderResolver = graphApiClient.getFolderResolver();
+    
+    // Resolve folder name to ID
+    let folderId;
+    try {
+      folderId = await folderResolver.resolveFolderToId(folder);
+    } catch (folderError) {
+      return createValidationError('folder', folderError.message);
+    }
     
     const options = {
       select: 'subject,from,receivedDateTime,bodyPreview,isRead',
@@ -18,9 +27,14 @@ export async function listEmailsTool(authManager, args) {
       options.filter = filter;
     }
 
-    const result = await graphApiClient.makeRequest(`/me/mailFolders/${folder}/messages`, options);
+    const result = await graphApiClient.makeRequest(`/me/mailFolders/${folderId}/messages`, options);
 
-    const emails = result.value.map(email => ({
+    // Handle MCP error responses from makeRequest
+    if (result.content && result.isError !== undefined) {
+      return result;
+    }
+
+    const emails = result.value?.map(email => ({
       id: email.id,
       subject: email.subject,
       from: email.from?.emailAddress?.address || 'Unknown',
@@ -28,13 +42,20 @@ export async function listEmailsTool(authManager, args) {
       receivedDateTime: email.receivedDateTime,
       preview: email.bodyPreview,
       isRead: email.isRead,
-    }));
+    })) || [];
 
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify({ emails, count: emails.length }, null, 2),
+          text: JSON.stringify({ 
+            folder: {
+              name: folder,
+              id: folderId
+            },
+            emails, 
+            count: emails.length 
+          }, null, 2),
         },
       ],
     };
@@ -45,13 +66,16 @@ export async function listEmailsTool(authManager, args) {
 
 // Get detailed information about a specific email
 export async function getEmailTool(authManager, args) {
+  console.error(`DEBUG getEmailTool: Called with args:`, JSON.stringify(args, null, 2));
   const { messageId } = args;
 
   if (!messageId) {
+    console.error(`DEBUG getEmailTool: Missing messageId parameter`);
     return createValidationError('messageId', 'Parameter is required');
   }
 
   try {
+    console.error(`DEBUG getEmailTool: Starting authentication for messageId: ${messageId}`);
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
     
@@ -59,7 +83,15 @@ export async function getEmailTool(authManager, args) {
       select: 'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,body,bodyPreview,importance,isRead,hasAttachments,attachments,conversationId'
     };
 
+    console.error(`DEBUG getEmailTool: Making Graph API request for ${messageId}`);
     const email = await graphApiClient.makeRequest(`/me/messages/${messageId}`, options);
+    console.error(`DEBUG getEmailTool: Got email response with subject: ${email?.subject || 'NO SUBJECT'}`);
+    
+    // Check if the response is already an MCP error
+    if (email && email.content && email.isError !== undefined) {
+      console.error(`DEBUG getEmailTool: Graph API returned MCP error:`, email);
+      return email;
+    }
 
     const emailData = {
       id: email.id,
@@ -99,7 +131,8 @@ export async function getEmailTool(authManager, args) {
       conversationId: email.conversationId
     };
 
-    return {
+    console.error(`DEBUG getEmailTool: Built emailData structure, returning response`);
+    const response = {
       content: [
         {
           type: 'text',
@@ -107,7 +140,10 @@ export async function getEmailTool(authManager, args) {
         },
       ],
     };
+    console.error(`DEBUG getEmailTool: Final response length: ${response.content[0].text.length} chars`);
+    return response;
   } catch (error) {
+    console.error(`DEBUG getEmailTool: Caught error:`, error);
     return convertErrorToToolError(error, 'Failed to get email');
   }
 }

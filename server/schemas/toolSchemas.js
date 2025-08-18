@@ -25,6 +25,11 @@ import {
   attachmentSchemaMap 
 } from './attachmentSchemas.js';
 
+import { 
+  sharePointSchemas, 
+  sharePointSchemaMap 
+} from './sharePointSchemas.js';
+
 /**
  * Complete array of all tool schemas
  */
@@ -33,6 +38,7 @@ export const allToolSchemas = [
   ...calendarSchemas,
   ...folderSchemas,
   ...attachmentSchemas,
+  ...sharePointSchemas,
 ];
 
 /**
@@ -43,6 +49,7 @@ export const allToolSchemaMap = {
   ...calendarSchemaMap,
   ...folderSchemaMap,
   ...attachmentSchemaMap,
+  ...sharePointSchemaMap,
 };
 
 /**
@@ -53,6 +60,7 @@ export const schemasByCategory = {
   calendar: calendarSchemas,
   folder: folderSchemas,
   attachment: attachmentSchemas,
+  sharepoint: sharePointSchemas,
 };
 
 /**
@@ -63,6 +71,7 @@ export const schemaMaps = {
   calendar: calendarSchemaMap,
   folder: folderSchemaMap,
   attachment: attachmentSchemaMap,
+  sharepoint: sharePointSchemaMap,
 };
 
 /**
@@ -164,3 +173,8 @@ export {
   attachmentSchemas, 
   attachmentSchemaMap 
 } from './attachmentSchemas.js';
+
+export { 
+  sharePointSchemas, 
+  sharePointSchemaMap 
+} from './sharePointSchemas.js';

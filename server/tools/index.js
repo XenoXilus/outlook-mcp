@@ -64,3 +64,6 @@ export { scanAttachmentsTool } from './attachments/scanAttachments.js';
 
 // Utility tools
 export { getRateLimitMetricsTool, resetRateLimitMetricsTool } from './common/rateLimitUtils.js';
+
+// SharePoint tools
+export { getSharePointFileTool, listSharePointFilesTool, resolveSharePointLinkTool } from './sharepoint/getSharePointFile.js';

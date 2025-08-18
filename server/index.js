@@ -35,6 +35,10 @@ process.on('uncaughtException', (error) => {
     console.error('Debug: Loading MCP error utilities...');
     const { createToolError, createProtocolError, ErrorCodes, convertErrorToToolError } = await import('./utils/mcpErrorResponse.js');
     
+    console.error('Debug: Loading tool schemas...');
+    const { allToolSchemas } = await import('./schemas/toolSchemas.js');
+    console.error(`Debug: Loaded ${allToolSchemas.length} tool schemas`);
+    
     console.error('Debug: Loading tools...');
     const tools = await import('./tools/index.js');
     console.error('Debug: Tools imported, available:', Object.keys(tools).length);
@@ -68,7 +72,11 @@ process.on('uncaughtException', (error) => {
       listAttachmentsTool,
       downloadAttachmentTool,
       addAttachmentTool,
-      scanAttachmentsTool
+      scanAttachmentsTool,
+      // SharePoint Tools
+      getSharePointFileTool,
+      listSharePointFilesTool,
+      resolveSharePointLinkTool
     } = tools;
     
     console.error('Debug: All required tools extracted successfully');
@@ -115,259 +123,36 @@ process.on('uncaughtException', (error) => {
     });
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
+      console.error(`Debug: Returning ${allToolSchemas.length} tools to client`);
       return {
-        tools: [
-          {
-            name: 'outlook_list_emails',
-            description: 'List emails from Outlook inbox or specified folder',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                folder: {
-                  type: 'string',
-                  description: 'Folder to list emails from (default: inbox)',
-                  default: 'inbox',
-                },
-                limit: {
-                  type: 'number',
-                  description: 'Maximum number of emails to return',
-                  default: 10,
-                },
-                filter: {
-                  type: 'string',
-                  description: 'OData filter query for emails',
-                },
-              },
-            },
-          },
-          {
-            name: 'outlook_send_email',
-            description: 'Send an email through Outlook',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                to: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description: 'Recipient email addresses',
-                },
-                subject: {
-                  type: 'string',
-                  description: 'Email subject',
-                },
-                body: {
-                  type: 'string',
-                  description: 'Email body content',
-                },
-                bodyType: {
-                  type: 'string',
-                  enum: ['text', 'html'],
-                  default: 'text',
-                  description: 'Body content type',
-                },
-                cc: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description: 'CC recipients',
-                },
-                bcc: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description: 'BCC recipients',
-                },
-                preserveUserStyling: {
-                  type: 'boolean',
-                  description: 'Apply user\'s default Outlook styling, font preferences, and signature',
-                  default: true,
-                },
-              },
-              required: ['to', 'subject', 'body'],
-            },
-          },
-          {
-            name: 'outlook_list_events',
-            description: 'List calendar events from Outlook',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                startDateTime: {
-                  type: 'string',
-                  description: 'Start date/time in ISO 8601 format',
-                },
-                endDateTime: {
-                  type: 'string',
-                  description: 'End date/time in ISO 8601 format',
-                },
-                limit: {
-                  type: 'number',
-                  description: 'Maximum number of events to return',
-                  default: 10,
-                },
-                calendar: {
-                  type: 'string',
-                  description: 'Calendar ID (default: primary calendar)',
-                },
-              },
-            },
-          },
-          {
-            name: 'outlook_create_event',
-            description: 'Create a new calendar event in Outlook',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                subject: {
-                  type: 'string',
-                  description: 'Event subject/title',
-                },
-                start: {
-                  type: 'object',
-                  properties: {
-                    dateTime: {
-                      type: 'string',
-                      description: 'Start date/time in ISO 8601 format',
-                    },
-                    timeZone: {
-                      type: 'string',
-                      description: 'Time zone (e.g., "Pacific Standard Time")',
-                    },
-                  },
-                  required: ['dateTime', 'timeZone'],
-                },
-                end: {
-                  type: 'object',
-                  properties: {
-                    dateTime: {
-                      type: 'string',
-                      description: 'End date/time in ISO 8601 format',
-                    },
-                    timeZone: {
-                      type: 'string',
-                      description: 'Time zone (e.g., "Pacific Standard Time")',
-                    },
-                  },
-                  required: ['dateTime', 'timeZone'],
-                },
-                body: {
-                  type: 'string',
-                  description: 'Event description',
-                },
-                location: {
-                  type: 'string',
-                  description: 'Event location',
-                },
-                attendees: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description: 'Attendee email addresses',
-                },
-                isOnlineMeeting: {
-                  type: 'boolean',
-                  description: 'Whether to create this as a Teams meeting (default: false)',
-                },
-              },
-              required: ['subject', 'start', 'end'],
-            },
-          },
-          {
-            name: 'outlook_get_email',
-            description: 'Get detailed information about a specific email',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                messageId: {
-                  type: 'string',
-                  description: 'The ID of the email message to retrieve',
-                },
-              },
-              required: ['messageId'],
-            },
-          },
-          {
-            name: 'outlook_search_emails',
-            description: 'Search emails across all folders with advanced filters',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                query: {
-                  type: 'string',
-                  description: 'Free-text search query across email content',
-                },
-                subject: {
-                  type: 'string',
-                  description: 'Search emails with specific subject text',
-                },
-                from: {
-                  type: 'string',
-                  description: 'Filter emails from specific sender',
-                },
-                startDate: {
-                  type: 'string',
-                  description: 'Start date for email search (ISO 8601 format)',
-                },
-                endDate: {
-                  type: 'string',
-                  description: 'End date for email search (ISO 8601 format)',
-                },
-                folders: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description: 'Specific folders to search in',
-                },
-                limit: {
-                  type: 'number',
-                  description: 'Maximum number of emails to return',
-                  default: 100,
-                },
-              },
-            },
-          },
-          {
-            name: 'outlook_list_folders',
-            description: 'List all email folders',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                includeHidden: {
-                  type: 'boolean',
-                  description: 'Include hidden folders',
-                  default: false,
-                },
-                includeChildFolders: {
-                  type: 'boolean',
-                  description: 'Include nested child folders',
-                  default: true,
-                },
-                top: {
-                  type: 'number',
-                  description: 'Maximum number of folders to return',
-                  default: 100,
-                },
-              },
-            },
-          },
-        ],
+        tools: allToolSchemas,
       };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
+      console.error(`DEBUG Tool Dispatch: Called tool '${name}' with args:`, JSON.stringify(args, null, 2));
 
       try {
         switch (name) {
           case 'outlook_list_emails':
+            console.error(`DEBUG: Calling listEmailsTool`);
             return await listEmailsTool(authManager, args);
           
           case 'outlook_send_email':
+            console.error(`DEBUG: Calling sendEmailTool`);
             return await sendEmailTool(authManager, args);
           
           case 'outlook_list_events':
+            console.error(`DEBUG: Calling listEventsTool`);
             return await listEventsTool(authManager, args);
           
           case 'outlook_create_event':
+            console.error(`DEBUG: Calling createEventTool`);
             return await createEventTool(authManager, args);
           
           case 'outlook_get_email':
+            console.error(`DEBUG: Calling getEmailTool`);
             return await getEmailTool(authManager, args);
           
           case 'outlook_search_emails':
@@ -429,6 +214,15 @@ process.on('uncaughtException', (error) => {
           
           case 'outlook_scan_attachments':
             return await scanAttachmentsTool(authManager, args);
+          
+          case 'outlook_get_sharepoint_file':
+            return await getSharePointFileTool(authManager, args);
+          
+          case 'outlook_list_sharepoint_files':
+            return await listSharePointFilesTool(authManager, args);
+          
+          case 'outlook_resolve_sharepoint_link':
+            return await resolveSharePointLinkTool(authManager, args);
           
           default:
             return createProtocolError(

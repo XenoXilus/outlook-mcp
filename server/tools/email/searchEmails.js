@@ -30,17 +30,28 @@ export async function searchEmailsTool(authManager, args) {
       options.select = 'id,subject,from,toRecipients,receivedDateTime,sentDateTime,bodyPreview,importance,isRead,hasAttachments,conversationId';
     }
 
+    // Resolve folder names to IDs if provided
+    let resolvedFolderIds = [];
+    if (folders.length > 0) {
+      try {
+        const folderResolver = graphApiClient.getFolderResolver();
+        resolvedFolderIds = await folderResolver.resolveFoldersToIds(folders);
+      } catch (folderError) {
+        return createValidationError('folders', folderError.message);
+      }
+    }
+
     // Determine search strategy and endpoint
     let endpoint = '/me/messages';
     let useKQLSearch = false;
     let useODataFilters = false;
-    const isSpecificFolder = folders.length === 1;
+    const isSpecificFolder = resolvedFolderIds.length === 1;
     
     if (isSpecificFolder) {
       // Single folder search
-      endpoint = `/me/mailFolders/${folders[0]}/messages`;
+      endpoint = `/me/mailFolders/${resolvedFolderIds[0]}/messages`;
       useODataFilters = true;
-    } else if (folders.length > 1) {
+    } else if (resolvedFolderIds.length > 1) {
       // Multiple folders - we'll need to make separate requests and combine
       // For now, fall back to all folders search
       endpoint = '/me/messages';
@@ -154,7 +165,12 @@ export async function searchEmailsTool(authManager, args) {
     // Make the request using chosen search strategy
     const result = await graphApiClient.makeRequest(endpoint, options);
 
-    const emails = result.value.map(email => {
+    // Handle MCP error responses from makeRequest
+    if (result.content && result.isError !== undefined) {
+      return result;
+    }
+
+    const emails = result.value?.map(email => {
       const emailData = {
         id: email.id,
         subject: email.subject,
@@ -184,7 +200,7 @@ export async function searchEmailsTool(authManager, args) {
       }
 
       return emailData;
-    });
+    }) || [];
 
     const searchSummary = {
       searchApproach: useKQLSearch ? 'KQL (Keyword Query Language)' : 'OData $filter',

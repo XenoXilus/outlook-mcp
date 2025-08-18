@@ -36,8 +36,13 @@ export const downloadAttachmentSchema = {
       },
       includeContent: {
         type: 'boolean',
-        description: 'Whether to include the base64-encoded file content',
+        description: 'Whether to include the file content',
         default: false,
+      },
+      decodeContent: {
+        type: 'boolean',
+        description: 'Whether to decode Base64 content to readable format (text files) or provide summary (binary files)',
+        default: true,
       },
     },
     required: ['messageId', 'attachmentId'],
