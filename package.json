@@ -26,6 +26,7 @@
     "@microsoft/microsoft-graph-client": "^3.0.7",
     "@modelcontextprotocol/sdk": "^1.15.0",
     "dotenv": "^17.1.0",
+    "isomorphic-dompurify": "^2.26.0",
     "node-persist": "^4.0.4",
     "officeparser": "^5.2.0",
     "xlsx": "^0.18.5"
@@ -35,7 +36,6 @@
   },
   "description": "Microsoft Outlook MCP server for Claude Desktop",
   "devDependencies": {
-    "isomorphic-dompurify": "^2.26.0",
     "vitest": "^3.2.4"
   }
 }

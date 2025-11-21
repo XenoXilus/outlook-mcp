@@ -1,8 +1,11 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse } from '../../utils/jsonUtils.js';
+import { stripHtml, truncateText } from '../../utils/textUtils.js';
 
 // Search emails with intelligent KQL/OData strategy selection
 export async function searchEmailsTool(authManager, args) {
-  const { 
+  const {
     query,
     subject,
     from,
@@ -10,7 +13,10 @@ export async function searchEmailsTool(authManager, args) {
     endDate,
     folders = [],
     limit = 100,
-    includeBody = true,
+    includeBody = false, // Changed default to false
+    truncate = true,
+    maxLength = 1000,
+    format = 'text',
     orderBy = 'receivedDateTime desc'
   } = args;
 
@@ -46,7 +52,7 @@ export async function searchEmailsTool(authManager, args) {
     let useKQLSearch = false;
     let useODataFilters = false;
     const isSpecificFolder = resolvedFolderIds.length === 1;
-    
+
     if (isSpecificFolder) {
       // Single folder search
       endpoint = `/me/mailFolders/${resolvedFolderIds[0]}/messages`;
@@ -59,7 +65,7 @@ export async function searchEmailsTool(authManager, args) {
     } else {
       // All folders search (folders.length === 0)
       endpoint = '/me/messages';
-      
+
       // Decide between KQL search and OData filters
       if (query) {
         // Use KQL search for text queries (more efficient for content search)
@@ -74,7 +80,7 @@ export async function searchEmailsTool(authManager, args) {
     if (useODataFilters) {
       // Use $filter for reliable, comprehensive searches
       const filterConditions = [];
-      
+
       // For Microsoft Graph API compatibility with $orderby, we need receivedDateTime in $filter
       // when using receivedDateTime in $orderby. Add it first to match orderby priority.
       if (orderBy && orderBy.includes('receivedDateTime')) {
@@ -84,7 +90,7 @@ export async function searchEmailsTool(authManager, args) {
           // Add a broad receivedDateTime filter to satisfy API requirements
           filterConditions.push(`receivedDateTime ge 1900-01-01T00:00:00Z`);
         }
-        
+
         if (endDate) {
           filterConditions.push(`receivedDateTime le ${endDate}`);
         }
@@ -93,32 +99,32 @@ export async function searchEmailsTool(authManager, args) {
         if (startDate) {
           filterConditions.push(`receivedDateTime ge ${startDate}`);
         }
-        
+
         if (endDate) {
           filterConditions.push(`receivedDateTime le ${endDate}`);
         }
       }
-      
+
       if (from) {
         filterConditions.push(`from/emailAddress/address eq '${from.replace(/'/g, "''")}'`);
       }
-      
+
       if (subject) {
         filterConditions.push(`contains(subject,'${subject.replace(/'/g, "''")}')`);
       }
-      
+
       if (query) {
         // Use contains for general text search
         filterConditions.push(`contains(subject,'${query.replace(/'/g, "''")}') or contains(body/content,'${query.replace(/'/g, "''")}')`);
       }
-      
+
       if (filterConditions.length > 0) {
         options.filter = filterConditions.join(' and ');
       }
-      
+
       // Add orderby for OData filter searches
       options.orderby = orderBy;
-      
+
     } else if (useKQLSearch) {
       // Use KQL search for text-based queries (combines text search with other filters)
       const kqlTerms = [];
@@ -193,9 +199,24 @@ export async function searchEmailsTool(authManager, args) {
 
       // Include full body if requested
       if (includeBody && email.body) {
+        let processedContent = email.body.content || '';
+        let contentType = email.body.contentType || 'Text';
+
+        // Strip HTML if requested (default: true, unless format is explicitly 'html')
+        if (format === 'text' && contentType === 'html') {
+          processedContent = stripHtml(processedContent);
+          contentType = 'text';
+        }
+
+        // Truncate if requested (default: true)
+        if (truncate) {
+          processedContent = truncateText(processedContent, maxLength);
+          emailData.truncated = true;
+        }
+
         emailData.body = {
-          contentType: email.body.contentType || 'Text',
-          content: email.body.content || ''
+          contentType: contentType,
+          content: processedContent
         };
       }
 
@@ -212,28 +233,21 @@ export async function searchEmailsTool(authManager, args) {
         generalSearch: query || null,
         sender: from ? (useKQLSearch ? `KQL: from:${from}` : `Filter: from/emailAddress/address eq '${from}'`) : null,
         subject: subject ? (useKQLSearch ? `KQL: subject:${subject}` : `Filter: contains(subject,'${subject}')`) : null,
-        dateRange: startDate && endDate ? (useKQLSearch ? `KQL: received:${new Date(startDate).toLocaleDateString('en-US')}..${new Date(endDate).toLocaleDateString('en-US')}` : `Filter: receivedDateTime ge ${startDate} and receivedDateTime le ${endDate}`) : 
-                   startDate ? (useKQLSearch ? `KQL: received>=${new Date(startDate).toLocaleDateString('en-US')}` : `Filter: receivedDateTime ge ${startDate}`) :
-                   endDate ? (useKQLSearch ? `KQL: received<=${new Date(endDate).toLocaleDateString('en-US')}` : `Filter: receivedDateTime le ${endDate}`) : null
+        dateRange: startDate && endDate ? (useKQLSearch ? `KQL: received:${new Date(startDate).toLocaleDateString('en-US')}..${new Date(endDate).toLocaleDateString('en-US')}` : `Filter: receivedDateTime ge ${startDate} and receivedDateTime le ${endDate}`) :
+          startDate ? (useKQLSearch ? `KQL: received>=${new Date(startDate).toLocaleDateString('en-US')}` : `Filter: receivedDateTime ge ${startDate}`) :
+            endDate ? (useKQLSearch ? `KQL: received<=${new Date(endDate).toLocaleDateString('en-US')}` : `Filter: receivedDateTime le ${endDate}`) : null
       },
       totalResults: emails.length,
       includesFullBody: includeBody,
-      optimization: useKQLSearch ? 'Using KQL for text-based search (efficient for content search)' : 
-                   isSpecificFolder ? 'Using $filter for specific folder search (comprehensive)' : 
-                   'Using $filter for all-folders search (comprehensive across all folders)'
+      optimization: useKQLSearch ? 'Using KQL for text-based search (efficient for content search)' :
+        isSpecificFolder ? 'Using $filter for specific folder search (comprehensive)' :
+          'Using $filter for all-folders search (comprehensive across all folders)'
     };
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ 
-            searchSummary,
-            emails 
-          }, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse({
+      searchSummary,
+      emails
+    });
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to search emails');
   }

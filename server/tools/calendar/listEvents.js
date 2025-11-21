@@ -1,4 +1,5 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse } from '../../utils/jsonUtils.js';
 
 // List calendar events
 export async function listEventsTool(authManager, args) {
@@ -31,14 +32,7 @@ export async function listEventsTool(authManager, args) {
       preview: event.bodyPreview,
     }));
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ events, count: events.length }, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse({ events, count: events.length });
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to list events');
   }

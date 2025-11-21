@@ -1,5 +1,6 @@
 import { applyUserStyling } from '../common/sharedUtils.js';
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse, safeStringify } from '../../utils/jsonUtils.js';
 
 // Get detailed event information
 export async function getEventTool(authManager, args) {
@@ -56,14 +57,7 @@ export async function getEventTool(authManager, args) {
       lastModifiedDateTime: event.lastModifiedDateTime
     };
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(eventData, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(eventData);
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to get event');
   }
@@ -274,25 +268,11 @@ export async function validateEventDateTimesTool(authManager, args) {
       }
     };
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(validation, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(validation);
   } catch (error) {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            valid: false,
-            error: error.message
-          }, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse({
+      valid: false,
+      error: error.message
+    });
   }
 }

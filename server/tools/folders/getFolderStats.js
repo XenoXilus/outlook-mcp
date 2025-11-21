@@ -1,4 +1,5 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse } from '../../utils/jsonUtils.js';
 
 // Get folder statistics
 export async function getFolderStatsTool(authManager, args) {
@@ -48,14 +49,7 @@ export async function getFolderStatsTool(authManager, args) {
       }
     }
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(stats, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(stats);
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to get folder stats');
   }

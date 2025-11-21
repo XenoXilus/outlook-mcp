@@ -2,6 +2,7 @@ import { Client } from '@microsoft/microsoft-graph-client';
 import { authConfig } from '../auth/config.js';
 import { convertErrorToToolError, createServiceUnavailableError, createRateLimitError, createValidationError } from '../utils/mcpErrorResponse.js';
 import { FolderResolver } from './folderResolver.js';
+import { safeStringify } from '../utils/jsonUtils.js';
 
 export class GraphApiClient {
   constructor(authManager) {
@@ -254,8 +255,8 @@ export class GraphApiClient {
           this.rateLimitMetrics.backoffTime += waitTime;
           
           console.warn(`Rate limited on ${method} ${path}. Waiting ${waitTime}ms before retry ${retryCount + 1}/${maxRetries} [correlation: ${clientRequestId}]`);
-          console.warn('Rate limit details:', JSON.stringify(errorDetails, null, 2));
-          console.warn('Rate limit metrics:', JSON.stringify(this.getRateLimitMetrics(), null, 2));
+          console.warn('Rate limit details:', safeStringify(errorDetails, 2));
+          console.warn('Rate limit metrics:', safeStringify(this.getRateLimitMetrics(), 2));
           
           if (retryCount < maxRetries) {
             await this.sleep(waitTime);
@@ -275,7 +276,7 @@ export class GraphApiClient {
         // Handle server errors (5xx) with exponential backoff
         if (error.status >= 500 && error.status < 600) {
           console.warn(`Server error ${error.status} on ${method} ${path}. Retry ${retryCount + 1}/${maxRetries} after ${delay}ms [correlation: ${clientRequestId}]`);
-          console.warn('Server error details:', JSON.stringify(errorDetails, null, 2));
+          console.warn('Server error details:', safeStringify(errorDetails, 2));
           
           if (retryCount < maxRetries) {
             await this.sleep(delay);
@@ -304,7 +305,7 @@ export class GraphApiClient {
         
         // Log final error and return MCP error
         console.error(`Graph API error: ${method} ${path} [correlation: ${clientRequestId}]`);
-        console.error('Error details:', JSON.stringify(errorDetails, null, 2));
+        console.error('Error details:', safeStringify(errorDetails, 2));
         
         return this.handleGraphError(error, errorDetails);
       }
@@ -352,7 +353,7 @@ export class GraphApiClient {
     };
 
     // Log comprehensive error details for debugging
-    console.error('Graph API Error - Full Details:', JSON.stringify(errorDetails, null, 2));
+    console.error('Graph API Error - Full Details:', safeStringify(errorDetails, 2));
 
     // Create user-friendly error message with correlation IDs for support
     let userMessage = '';

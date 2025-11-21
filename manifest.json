@@ -19,6 +19,13 @@
       "title": "Azure Tenant ID", 
       "description": "Azure Active Directory tenant (directory) ID",
       "required": true
+    },
+    "download_directory": {
+      "type": "string",
+      "title": "Download Directory",
+      "description": "Directory path where email attachments and files will be downloaded. Leave empty to use system temp directory.",
+      "required": false,
+      "default": ""
     }
   },
   "server": {
@@ -31,7 +38,8 @@
       ],
       "env": {
         "AZURE_CLIENT_ID": "${user_config.azure_client_id}",
-        "AZURE_TENANT_ID": "${user_config.azure_tenant_id}"
+        "AZURE_TENANT_ID": "${user_config.azure_tenant_id}",
+        "MCP_OUTLOOK_WORK_DIR": "${user_config.download_directory}"
       }
     }
   },

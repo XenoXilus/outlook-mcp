@@ -1,5 +1,6 @@
 // Rate limiting utilities
 import { convertErrorToToolError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse } from '../../utils/jsonUtils.js';
 
 // Get rate limit metrics
 export async function getRateLimitMetricsTool(authManager, args) {
@@ -18,14 +19,7 @@ export async function getRateLimitMetricsTool(authManager, args) {
       }
     };
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(metrics, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(metrics);
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to get rate limit metrics');
   }

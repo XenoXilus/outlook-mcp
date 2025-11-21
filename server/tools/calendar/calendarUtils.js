@@ -1,5 +1,6 @@
 import { applyUserStyling } from '../common/sharedUtils.js';
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse, safeStringify } from '../../utils/jsonUtils.js';
 
 // Create recurring event
 export async function createRecurringEventTool(authManager, args) {
@@ -89,14 +90,7 @@ export async function findMeetingTimesTool(authManager, args) {
 
     const result = await graphApiClient.postWithRetry('/me/calendar/getSchedule', requestBody);
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(result, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(result);
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to find meeting times');
   }
@@ -137,14 +131,7 @@ export async function checkAvailabilityTool(authManager, args) {
 
     const result = await graphApiClient.postWithRetry('/me/calendar/getSchedule', requestBody);
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(result, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(result);
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to check availability');
   }
@@ -237,14 +224,7 @@ export async function listCalendarsTool(authManager, args) {
       owner: calendar.owner
     })) || [];
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ calendars, count: calendars.length }, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse({ calendars, count: calendars.length });
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to list calendars');
   }
@@ -294,14 +274,7 @@ export async function getCalendarViewTool(authManager, args) {
       webLink: event.webLink
     })) || [];
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ events, count: events.length }, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse({ events, count: events.length });
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to get calendar view');
   }
@@ -370,14 +343,7 @@ export async function getBusyTimesTool(authManager, args) {
       busyTimes.push(busySchedule);
     });
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ busyTimes, rawData: result }, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse({ busyTimes, rawData: result });
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to get busy times');
   }
@@ -477,26 +443,12 @@ export async function buildRecurrencePatternTool(authManager, args) {
       }
     };
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(patternInfo, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(patternInfo);
   } catch (error) {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            valid: false,
-            error: error.message
-          }, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse({
+      valid: false,
+      error: error.message
+    });
   }
 }
 
@@ -741,14 +693,7 @@ export async function checkCalendarPermissionsTool(authManager, args) {
       permissions: calendar.permissions || []
     };
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(permissions, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(permissions);
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to check calendar permissions');
   }

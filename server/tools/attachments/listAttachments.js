@@ -1,4 +1,5 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse } from '../../utils/jsonUtils.js';
 
 // Helper function to format file size
 function formatFileSize(bytes) {
@@ -44,14 +45,7 @@ export async function listAttachmentsTool(authManager, args) {
 
     summary.totalSizeFormatted = formatFileSize(summary.totalSize);
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(summary, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(summary);
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to list attachments');
   }

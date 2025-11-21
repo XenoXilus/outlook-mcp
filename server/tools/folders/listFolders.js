@@ -1,4 +1,5 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse } from '../../utils/jsonUtils.js';
 
 // List mail folders
 export async function listFoldersTool(authManager, args) {
@@ -34,14 +35,7 @@ export async function listFoldersTool(authManager, args) {
       isHidden: folder.isHidden || false
     })) || [];
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ folders, count: folders.length }, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse({ folders, count: folders.length });
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to list folders');
   }

@@ -5,8 +5,9 @@
  * Handles various SharePoint URL formats and sharing links.
  */
 
-import { createValidationError, createToolError, convertErrorToToolError } from '../../utils/mcpErrorResponse.js';
-import { Buffer } from 'buffer';
+import { convertErrorToToolError, createValidationError, createToolError } from '../../utils/mcpErrorResponse.js';
+import { handleLargeContent } from '../../utils/fileOutput.js';
+import { safeStringify, createSafeResponse } from '../../utils/jsonUtils.js';
 import { graphHelpers } from '../../graph/graphHelpers.js';
 import * as XLSX from 'xlsx';
 import officeParser from 'officeparser';
@@ -709,7 +710,7 @@ export async function getSharePointFileTool(authManager, args) {
       
       // Parse the SharePoint URL
       const urlInfo = parseSharePointUrl(args.sharePointUrl);
-      console.error('Parsed URL info:', JSON.stringify(urlInfo, null, 2));
+      console.error('Parsed URL info:', safeStringify(urlInfo, 2));
       
       // Standard SharePoint sharing URLs from emails should be processed directly
       // They follow the format: /:x:/r/personal/ or /:w:/r/sites/ with d= and e= parameters
@@ -892,12 +893,7 @@ export async function getSharePointFileTool(authManager, args) {
       };
     }
 
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(finalResponse, null, 2)
-      }]
-    };
+    return createSafeResponse(finalResponse);
     
   } catch (error) {
     console.error('SharePoint file access error:', error);
@@ -926,7 +922,7 @@ export async function resolveSharePointLinkTool(authManager, args) {
     
     // Parse the URL first
     const urlInfo = parseSharePointUrl(args.sharePointUrl);
-    console.error('Resolve SharePoint link - Parsed URL info:', JSON.stringify(urlInfo, null, 2));
+    console.error('Resolve SharePoint link - Parsed URL info:', safeStringify(urlInfo, 2));
     
     // Resolve the sharing link to get metadata only
     const fileInfo = await resolveSharedFile(graphApiClient, args.sharePointUrl, urlInfo);
@@ -958,21 +954,16 @@ export async function resolveSharePointLinkTool(authManager, args) {
       }
     }
     
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          success: true,
-          file: result,
-          message: `Successfully resolved ${result.type}: ${result.name}`,
-          usage: {
-            downloadUrl: 'Use downloadUrl for direct download without re-authentication',
-            webUrl: 'Use webUrl to view in browser',
-            fileId: 'Use id with outlook_get_sharepoint_file for content download'
-          }
-        }, null, 2)
-      }]
-    };
+    return createSafeResponse({
+      success: true,
+      file: result,
+      message: `Successfully resolved ${result.type}: ${result.name}`,
+      usage: {
+        downloadUrl: 'Use downloadUrl for direct download without re-authentication',
+        webUrl: 'Use webUrl to view in browser',
+        fileId: 'Use id with outlook_get_sharepoint_file for content download'
+      }
+    });
     
   } catch (error) {
     console.error('SharePoint link resolution error:', error);
@@ -1020,17 +1011,12 @@ export async function listSharePointFilesTool(authManager, args) {
       webUrl: item.webUrl
     }));
     
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          success: true,
-          files: files,
-          count: files.length,
-          message: `Found ${files.length} items`
-        }, null, 2)
-      }]
-    };
+    return createSafeResponse({
+      success: true,
+      files: files,
+      count: files.length,
+      message: `Found ${files.length} items`
+    });
     
   } catch (error) {
     console.error('SharePoint list files error:', error);

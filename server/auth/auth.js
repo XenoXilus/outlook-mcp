@@ -17,7 +17,9 @@ export class OutlookAuthManager {
     this.graphClient = null;
     this.graphApiClient = null;
     this.isAuthenticated = false;
+    this.isAuthenticated = false;
     this.authenticationRecord = null;
+    this.lastUsedPort = null;
   }
 
   openBrowser(url) {
@@ -46,7 +48,7 @@ export class OutlookAuthManager {
   async authenticate() {
     try {
       const isTokenValid = await this.tokenManager.isAuthenticated();
-      
+
       if (isTokenValid) {
         await this.initializeGraphClient();
         return await this.validateAuthentication();
@@ -77,7 +79,7 @@ export class OutlookAuthManager {
     await this.tokenManager.storePKCEVerifier(codeVerifier);
 
     const authorizationCode = await this.getAuthorizationCode(codeChallenge);
-    
+
     if (!authorizationCode) {
       return {
         success: false,
@@ -86,7 +88,7 @@ export class OutlookAuthManager {
     }
 
     const tokenResponse = await this.exchangeCodeForToken(authorizationCode);
-    
+
     await this.tokenManager.storeTokens(
       tokenResponse.access_token,
       tokenResponse.refresh_token,
@@ -101,10 +103,10 @@ export class OutlookAuthManager {
     return new Promise((resolve, reject) => {
       const state = crypto.randomBytes(16).toString('hex');
       const authUrl = new URL(authConfig.oauth.authorizeUrl(this.tenantId));
-      
+
       authUrl.searchParams.append('client_id', this.clientId);
       authUrl.searchParams.append('response_type', 'code');
-      authUrl.searchParams.append('redirect_uri', authConfig.oauth.redirectUri);
+      authUrl.searchParams.append('redirect_uri', `http://localhost:${server.address().port}/callback`);
       authUrl.searchParams.append('scope', authConfig.oauth.scope);
       authUrl.searchParams.append('state', state);
       authUrl.searchParams.append('code_challenge', codeChallenge);
@@ -114,17 +116,17 @@ export class OutlookAuthManager {
       console.error(`\nOpening your browser for Microsoft account selection...`);
       console.error(`If the browser doesn't open automatically, please visit:`);
       console.error(authUrl.toString());
-      
+
       // Attempt to open the browser automatically
       this.openBrowser(authUrl.toString());
 
       const server = http.createServer(async (req, res) => {
         const parsedUrl = url.parse(req.url, true);
-        
+
         if (parsedUrl.pathname === '/callback') {
           const code = parsedUrl.query.code;
           const returnedState = parsedUrl.query.state;
-          
+
           if (returnedState !== state) {
             res.writeHead(400, { 'Content-Type': 'text/html' });
             res.end(`
@@ -358,8 +360,20 @@ export class OutlookAuthManager {
         }
       });
 
-      server.listen(8080, () => {
-        console.error('\nWaiting for authentication callback...');
+      server.listen(0, () => {
+        const port = server.address().port;
+        this.lastUsedPort = port;
+        console.error(`\nListening for authentication callback on port ${port}...`);
+
+        // Update redirect URI with actual port
+        authUrl.searchParams.set('redirect_uri', `http://localhost:${port}/callback`);
+
+        console.error(`\nOpening your browser for Microsoft account selection...`);
+        console.error(`If the browser doesn't open automatically, please visit:`);
+        console.error(authUrl.toString());
+
+        // Attempt to open the browser automatically
+        this.openBrowser(authUrl.toString());
       });
 
       setTimeout(() => {
@@ -371,13 +385,13 @@ export class OutlookAuthManager {
 
   async exchangeCodeForToken(code) {
     const codeVerifier = await this.tokenManager.getPKCEVerifier();
-    
+
     const tokenUrl = authConfig.oauth.tokenUrl(this.tenantId);
     const params = new URLSearchParams({
       client_id: this.clientId,
       scope: authConfig.oauth.scope,
       code: code,
-      redirect_uri: authConfig.oauth.redirectUri,
+      redirect_uri: `http://localhost:${this.lastUsedPort}/callback`,
       grant_type: 'authorization_code',
       code_verifier: codeVerifier,
     });
@@ -402,7 +416,7 @@ export class OutlookAuthManager {
     try {
       const refreshToken = await this.tokenManager.getRefreshToken();
       const tokenUrl = authConfig.oauth.tokenUrl(this.tenantId);
-      
+
       const params = new URLSearchParams({
         client_id: this.clientId,
         scope: authConfig.oauth.scope,
@@ -424,7 +438,7 @@ export class OutlookAuthManager {
       }
 
       const tokenResponse = await response.json();
-      
+
       await this.tokenManager.storeTokens(
         tokenResponse.access_token,
         tokenResponse.refresh_token || refreshToken,
@@ -477,7 +491,7 @@ export class OutlookAuthManager {
     try {
       const user = await this.graphClient.api('/me').get();
       this.isAuthenticated = true;
-      
+
       return {
         success: true,
         user: {

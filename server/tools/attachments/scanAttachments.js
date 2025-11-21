@@ -1,4 +1,5 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse } from '../../utils/jsonUtils.js';
 
 // Helper function to format file size
 function formatFileSize(bytes) {
@@ -114,14 +115,7 @@ export async function scanAttachmentsTool(authManager, args) {
       largeAttachments: largeAttachments
     };
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(scanResults, null, 2),
-        },
-      ],
-    };
+    return createSafeResponse(scanResults);
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to scan attachments');
   }

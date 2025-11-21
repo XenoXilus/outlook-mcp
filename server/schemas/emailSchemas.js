@@ -84,6 +84,22 @@ export const getEmailSchema = {
         type: 'string',
         description: 'The ID of the email message to retrieve',
       },
+      truncate: {
+        type: 'boolean',
+        description: 'Truncate long email bodies (default: true)',
+        default: true,
+      },
+      maxLength: {
+        type: 'number',
+        description: 'Maximum length for truncated body (default: 1000)',
+        default: 1000,
+      },
+      format: {
+        type: 'string',
+        enum: ['text', 'html'],
+        description: 'Format of the body content (default: text)',
+        default: 'text',
+      },
     },
     required: ['messageId'],
   },
@@ -128,7 +144,23 @@ export const searchEmailsSchema = {
       includeBody: {
         type: 'boolean',
         description: 'Include full email body content for analysis',
+        default: false,
+      },
+      truncate: {
+        type: 'boolean',
+        description: 'Truncate long email bodies (default: true)',
         default: true,
+      },
+      maxLength: {
+        type: 'number',
+        description: 'Maximum length for truncated body (default: 1000)',
+        default: 1000,
+      },
+      format: {
+        type: 'string',
+        enum: ['text', 'html'],
+        description: 'Format of the body content (default: text)',
+        default: 'text',
       },
       orderBy: {
         type: 'string',
@@ -413,20 +445,20 @@ export const batchProcessEmailsSchema = {
         type: 'object',
         description: 'Additional data for the operation (e.g., destinationFolderId for move)',
         properties: {
-          destinationFolderId: { 
+          destinationFolderId: {
             type: 'string',
             description: 'Destination folder ID for move operations'
           },
-          flagStatus: { 
+          flagStatus: {
             type: 'string',
             description: 'Flag status for flag operations'
           },
-          categories: { 
-            type: 'array', 
+          categories: {
+            type: 'array',
             items: { type: 'string' },
             description: 'Categories for categorize operations'
           },
-          permanentDelete: { 
+          permanentDelete: {
             type: 'boolean',
             description: 'Whether to permanently delete for delete operations'
           },

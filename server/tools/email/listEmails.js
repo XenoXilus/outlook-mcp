@@ -1,5 +1,8 @@
 // List emails from a specific folder
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { createSafeResponse, safeStringify } from '../../utils/jsonUtils.js';
+import { stripHtml, truncateText } from '../../utils/textUtils.js';
 
 export async function listEmailsTool(authManager, args) {
   const { folder = 'inbox', limit = 10, filter } = args;
@@ -8,7 +11,7 @@ export async function listEmailsTool(authManager, args) {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
     const folderResolver = graphApiClient.getFolderResolver();
-    
+
     // Resolve folder name to ID
     let folderId;
     try {
@@ -16,7 +19,7 @@ export async function listEmailsTool(authManager, args) {
     } catch (folderError) {
       return createValidationError('folder', folderError.message);
     }
-    
+
     const options = {
       select: 'subject,from,receivedDateTime,bodyPreview,isRead',
       top: limit,
@@ -48,13 +51,13 @@ export async function listEmailsTool(authManager, args) {
       content: [
         {
           type: 'text',
-          text: JSON.stringify({ 
+          text: JSON.stringify({
             folder: {
               name: folder,
               id: folderId
             },
-            emails, 
-            count: emails.length 
+            emails,
+            count: emails.length
           }, null, 2),
         },
       ],
@@ -67,7 +70,12 @@ export async function listEmailsTool(authManager, args) {
 // Get detailed information about a specific email
 export async function getEmailTool(authManager, args) {
   console.error(`DEBUG getEmailTool: Called with args:`, JSON.stringify(args, null, 2));
-  const { messageId } = args;
+  const {
+    messageId,
+    truncate = true,
+    maxLength = 1000,
+    format = 'text'
+  } = args;
 
   if (!messageId) {
     console.error(`DEBUG getEmailTool: Missing messageId parameter`);
@@ -78,7 +86,7 @@ export async function getEmailTool(authManager, args) {
     console.error(`DEBUG getEmailTool: Starting authentication for messageId: ${messageId}`);
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
-    
+
     const options = {
       select: 'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,body,bodyPreview,importance,isRead,hasAttachments,attachments,conversationId'
     };
@@ -86,12 +94,22 @@ export async function getEmailTool(authManager, args) {
     console.error(`DEBUG getEmailTool: Making Graph API request for ${messageId}`);
     const email = await graphApiClient.makeRequest(`/me/messages/${messageId}`, options);
     console.error(`DEBUG getEmailTool: Got email response with subject: ${email?.subject || 'NO SUBJECT'}`);
-    
+
     // Check if the response is already an MCP error
     if (email && email.content && email.isError !== undefined) {
       console.error(`DEBUG getEmailTool: Graph API returned MCP error:`, email);
       return email;
     }
+
+    // Safety check - ensure we have a valid email object
+    if (!email || typeof email !== 'object') {
+      console.error(`DEBUG getEmailTool: Invalid email response:`, typeof email, email);
+      return createValidationError('response', 'Invalid email data received from Microsoft Graph API');
+    }
+
+    // Log the structure of the email object for debugging
+    console.error(`DEBUG getEmailTool: Email object keys:`, Object.keys(email || {}));
+    console.error(`DEBUG getEmailTool: Email object type:`, typeof email, 'isArray:', Array.isArray(email));
 
     const emailData = {
       id: email.id,
@@ -131,15 +149,30 @@ export async function getEmailTool(authManager, args) {
       conversationId: email.conversationId
     };
 
+    // Process body content based on preferences
+    if (emailData.body.content) {
+      let processedContent = emailData.body.content;
+
+      // Strip HTML if requested (default: true, unless format is explicitly 'html')
+      if (format === 'text' && emailData.body.contentType === 'html') {
+        processedContent = stripHtml(processedContent);
+        emailData.body.contentType = 'text';
+      }
+
+      // Truncate if requested (default: true)
+      if (truncate) {
+        processedContent = truncateText(processedContent, maxLength);
+        emailData.truncated = true;
+      }
+
+      emailData.body.content = processedContent;
+    }
+
     console.error(`DEBUG getEmailTool: Built emailData structure, returning response`);
-    const response = {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(emailData, null, 2),
-        },
-      ],
-    };
+
+    // Use safe response creation to prevent JSON serialization crashes
+    const response = createSafeResponse(emailData);
+
     console.error(`DEBUG getEmailTool: Final response length: ${response.content[0].text.length} chars`);
     return response;
   } catch (error) {

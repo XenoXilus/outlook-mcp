@@ -3,6 +3,7 @@ import { Buffer } from 'buffer';
 import * as XLSX from 'xlsx';
 import officeParser from 'officeparser';
 import { handleLargeContent, saveBase64File } from '../../utils/fileOutput.js';
+import { safeStringify, createSafeResponse } from '../../utils/jsonUtils.js';
 
 // Helper function to format file size
 function formatFileSize(bytes) {
@@ -544,7 +545,7 @@ export async function downloadAttachmentTool(authManager, args) {
     }
 
     // Handle large content by saving to file if needed
-    const responseText = JSON.stringify(attachmentInfo, null, 2);
+    const responseText = safeStringify(attachmentInfo, 2);
     const maxMcpResponseSize = 1048576; // 1MB MCP limit
     
     if (responseText.length > maxMcpResponseSize && attachmentInfo.contentBytes) {
@@ -575,7 +576,7 @@ export async function downloadAttachmentTool(authManager, args) {
         delete fileResponseInfo.contentBytes;
         // Keep parsed content if it's small enough
         if (attachmentInfo.content && typeof attachmentInfo.content === 'object') {
-          const contentSize = JSON.stringify(attachmentInfo.content).length;
+          const contentSize = safeStringify(attachmentInfo.content).length;
           if (contentSize > maxMcpResponseSize / 2) { // If parsed content is also large
             delete fileResponseInfo.content;
             fileResponseInfo.parsedContentTruncated = true;
@@ -587,7 +588,7 @@ export async function downloadAttachmentTool(authManager, args) {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(fileResponseInfo, null, 2),
+              text: safeStringify(fileResponseInfo, 2),
             },
           ],
         };
@@ -614,7 +615,7 @@ export async function downloadAttachmentTool(authManager, args) {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(largeContentInfo, null, 2),
+              text: safeStringify(largeContentInfo, 2),
             },
           ],
         };

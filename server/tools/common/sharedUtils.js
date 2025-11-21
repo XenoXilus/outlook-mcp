@@ -1,5 +1,6 @@
 // Shared utilities for all tools
 import { LRUCache } from '../../utils/LRUCache.js';
+import { safeStringify } from '../../utils/jsonUtils.js';
 
 // Replace Map-based caches with LRU caches to prevent memory leaks
 const stylingCache = new LRUCache(100, 30 * 60 * 1000); // 100 entries, 30 minutes
@@ -569,7 +570,7 @@ export async function applyUserStyling(graphApiClient, content, bodyType) {
     let mailSettings = null;
     try {
       mailSettings = await graphApiClient.makeRequest('/me/mailboxSettings');
-      console.log('Retrieved mailbox settings:', JSON.stringify(mailSettings, null, 2));
+      console.log('Retrieved mailbox settings:', safeStringify(mailSettings, 2));
     } catch (error) {
       if (error.message.includes('403') || error.message.includes('ErrorAccessDenied')) {
         console.warn('MailboxSettings.Read permission not granted, using basic styling');
