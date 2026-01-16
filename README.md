@@ -1,14 +1,12 @@
 # Microsoft Outlook MCP Server
 
-A Model Context Protocol (MCP) server that enables AI assistants to interact with Microsoft Outlook email, calendar, contacts, and tasks through the Microsoft Graph API.
+A Model Context Protocol (MCP) server that enables AI assistants to interact with Microsoft Outlook email and calendar through the Microsoft Graph API.
 
 ## Features
 
 - **Email Operations**: Read, search, send, reply to emails and download attachments
 - **SharePoint Integration**: Access SharePoint files via sharing links or direct file IDs
 - **Calendar Management**: View and manage calendar events and appointments
-- **Contact Management**: Access and manage Outlook contacts
-- **Task Management**: Create and manage Outlook tasks
 - **Office Document Processing**: Parse PDF, Word, PowerPoint, and Excel files with extracted text content
 - **Large File Support**: Automatic handling of files that exceed MCP response size limits
 
@@ -25,18 +23,56 @@ cd outlook-mcp
 npm install
 ```
 
-3. Set up Azure AD Application:
-   - Register an application in Azure AD
-   - Configure required Microsoft Graph API permissions
-   - Note the Application (client) ID for configuration
+3. Configure the server (see below).
+
+## Azure Setup Guide
+
+To use this MCP server, you need to register an application in Microsoft Azure.
+
+### For Business/Work Accounts (Recommended)
+
+1. Go to the [Azure Portal](https://portal.azure.com/) and search for "App registrations".
+2. Click **New registration**.
+   - Name: `Outlook MCP` (or similar)
+   - Supported account types: **Accounts in this organizational directory only** (Single tenant)
+   - Redirect URI: Select **Web** and enter `http://localhost/callback`
+3. Click **Register**.
+4. Go to **Authentication** in the sidebar.
+   - Under "Advanced settings", set **Allow public client flows** to **Yes**.
+   - Click **Save**.
+5. On the Overview page, copy:
+   - **Application (client) ID** → This is your `AZURE_CLIENT_ID`
+   - **Directory (tenant) ID** → This is your `AZURE_TENANT_ID`
+6. Go to **API permissions** in the sidebar.
+   - Click **Add a permission** -> **Microsoft Graph** -> **Delegated permissions**.
+   - Add these permissions:
+     - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`
+     - `Calendars.Read`, `Calendars.ReadWrite`
+     - `User.Read`, `MailboxSettings.Read`
+     - `Files.Read.All`, `Files.ReadWrite.All`
+     - `Sites.Read.All`, `Sites.ReadWrite.All`
+     - `offline_access`
+   - Click **Add permissions**.
+   - (Optional) If you are an admin, click **Grant admin consent** to suppress consent prompts for users.
+
+**Note:** No client secret is required (PKCE auth flow).
+
+### For Personal Accounts (outlook.com, hotmail.com)
+
+Personal Microsoft accounts can also register apps in Azure:
+
+1. Sign in to the [Azure Portal](https://portal.azure.com/) with your personal Microsoft account (outlook.com, hotmail.com, etc.).
+2. If prompted to create a directory, follow the steps to create a free Azure directory.
+3. Follow the same steps as above for Business accounts.
+4. When configuring, use **Accounts in any organizational directory and personal Microsoft accounts** for supported account types.
 
 ## Configuration
 
 ### Environment Variables
 
-The server supports the following environment variables:
-
 - `AZURE_CLIENT_ID`: Your Azure AD application client ID (required)
+- `AZURE_TENANT_ID`: Your Azure AD directory (tenant) ID (required)
+
 - `MCP_OUTLOOK_WORK_DIR`: Directory for saving large files that exceed MCP response limits (optional)
 
 #### Large File Handling
@@ -52,7 +88,8 @@ When downloading large attachments or SharePoint files, the server automatically
 Example configuration:
 ```bash
 export MCP_OUTLOOK_WORK_DIR="/path/to/your/work/directory"
-export AZURE_CLIENT_ID="your-azure-app-id"
+export AZURE_CLIENT_ID="your-client-id"
+export AZURE_TENANT_ID="your-tenant-id"
 ```
 
 ### Claude Desktop Integration
@@ -66,7 +103,8 @@ Add to your Claude Desktop MCP settings:
       "command": "node",
       "args": ["/path/to/outlook-mcp/server/index.js"],
       "env": {
-        "AZURE_CLIENT_ID": "your-azure-app-id",
+        "AZURE_CLIENT_ID": "your-client-id",
+        "AZURE_TENANT_ID": "your-tenant-id",
         "MCP_OUTLOOK_WORK_DIR": "/path/to/your/work/directory"
       }
     }
@@ -81,9 +119,10 @@ Add to your Claude Desktop MCP settings:
 ```javascript
 // Search for emails
 outlook_search_emails({
-  query: "from:user@example.com",
-  maxResults: 10,
-  folder: "inbox"
+  query: "meeting",
+  from: "user@example.com",
+  limit: 10,
+  folders: ["inbox"]
 })
 
 // Download email attachment
@@ -124,20 +163,20 @@ The server automatically detects and processes:
 The server uses OAuth 2.0 with PKCE for secure authentication:
 
 1. First run will open a browser for Microsoft authentication
-2. Tokens are securely stored using the OS keychain (keytar)
+2. Tokens are encrypted and stored locally (uses OS keychain if available, otherwise encrypted file storage)
 3. Automatic token refresh for long-term usage
 4. No sensitive data stored in plain text
 
 ## Required Permissions
 
-Your Azure AD application needs these Microsoft Graph API permissions:
+The app requests these Microsoft Graph permissions:
 
-- `Mail.ReadWrite`: Email access
-- `Calendars.ReadWrite`: Calendar access
-- `Contacts.ReadWrite`: Contact access
-- `Tasks.ReadWrite`: Task management
-- `Files.Read.All`: SharePoint file access
-- `Sites.Read.All`: SharePoint site access
+- `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` - Email access
+- `Calendars.Read`, `Calendars.ReadWrite` - Calendar access  
+- `User.Read`, `MailboxSettings.Read` - User profile
+- `Files.Read.All`, `Files.ReadWrite.All` - OneDrive/SharePoint files
+- `Sites.Read.All`, `Sites.ReadWrite.All` - SharePoint sites
+- `offline_access` - Refresh tokens
 
 ## File Size Limits and Handling
 
@@ -166,15 +205,14 @@ outlook-mcp/
 │   ├── index.js              # Main MCP server
 │   ├── auth/                 # Authentication management
 │   ├── graph/                # Microsoft Graph API client
+│   ├── schemas/              # MCP tool schemas
 │   ├── tools/                # MCP tool implementations
-│   │   ├── email/            # Email-related tools
-│   │   ├── sharepoint/       # SharePoint tools
+│   │   ├── attachments/      # Attachment tools
 │   │   ├── calendar/         # Calendar tools
-│   │   └── contacts/         # Contact tools
+│   │   ├── email/            # Email tools
+│   │   ├── folders/          # Folder management
+│   │   └── sharepoint/       # SharePoint tools
 │   └── utils/                # Utility modules
-│       ├── fileOutput.js     # Large file handling
-│       └── mcpErrorResponse.js
-├── docs/                     # Documentation
 └── package.json
 ```
 
@@ -207,9 +245,16 @@ npm run test:graph          # Test Graph API connection
 - **Solution**: Ensure sharing links are valid and user has access permissions
 - **Alternative**: Use direct file ID access if available
 
+## Support / Donate
+
+If this tool saved you time, consider supporting the development!
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow.svg)](https://buymeacoffee.com/) 
+*(Replace with your actual link)*
+
 ## License
 
-ISC License
+MIT License
 
 ## Contributing
 
