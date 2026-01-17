@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install DXT CLI
+        run: npm install -g @anthropic-ai/dxt
+
+      - name: Build DXT package
+        run: dxt pack . outlook-mcp.dxt
+
+      - name: Generate SHA256 checksum
+        run: |
+          sha256sum outlook-mcp.dxt > outlook-mcp.dxt.sha256
+          echo "SHA256 checksum:"
+          cat outlook-mcp.dxt.sha256
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Outlook MCP ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Outlook MCP ${{ steps.version.outputs.VERSION }}
+            
+            ### Installation
+            1. Download `outlook-mcp.dxt` below
+            2. In Claude Desktop: **Settings** → **Extensions** → **Install from file**
+            3. Enter your Azure Client ID and Tenant ID when prompted
+            
+            ### Verify Download (Optional)
+            ```bash
+            sha256sum -c outlook-mcp.dxt.sha256
+            ```
+            
+            See [README](https://github.com/XenoXilus/outlook-mcp#readme) for Azure setup instructions.
+          files: |
+            outlook-mcp.dxt
+            outlook-mcp.dxt.sha256
+          draft: false
+          prerelease: false
