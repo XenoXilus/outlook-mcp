@@ -68,6 +68,5 @@ jobs:
             See [README](https://github.com/XenoXilus/outlook-mcp#readme) for Azure setup instructions.
           files: |
             outlook-mcp.dxt
-            outlook-mcp.dxt.sha256
           draft: false
           prerelease: false
