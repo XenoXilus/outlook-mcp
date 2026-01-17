@@ -16,8 +16,8 @@
     "microsoft-graph",
     "claude"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "XenoXilus <xenoxilus@gmail.com>",
+  "license": "MIT",
   "dependencies": {
     "@azure/identity": "^4.10.2",
     "@microsoft/microsoft-graph-client": "^3.0.7",
