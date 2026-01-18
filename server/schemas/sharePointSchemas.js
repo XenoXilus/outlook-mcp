@@ -7,17 +7,17 @@
 
 export const getSharePointFileSchema = {
   name: 'outlook_get_sharepoint_file',
-  description: 'Fetch a SharePoint file using the same authenticated session as Outlook. Handles sharing links from emails.',
+  description: 'Fetch a SharePoint file using the same authenticated session as Outlook. Handles sharing links from emails. Either sharePointUrl OR fileId must be provided.',
   inputSchema: {
     type: 'object',
     properties: {
       sharePointUrl: {
         type: 'string',
-        description: 'SharePoint sharing URL from email (e.g., https://company.sharepoint.com/:w:/s/sitename/...)',
+        description: 'SharePoint sharing URL from email (e.g., https://company.sharepoint.com/:w:/s/sitename/...). Required if fileId is not provided.',
       },
       fileId: {
         type: 'string',
-        description: 'Direct file ID if known (alternative to sharePointUrl)',
+        description: 'Direct file ID if known. Required if sharePointUrl is not provided.',
       },
       driveId: {
         type: 'string',
@@ -29,10 +29,6 @@ export const getSharePointFileSchema = {
         default: false,
       },
     },
-    oneOf: [
-      { required: ['sharePointUrl'] },
-      { required: ['fileId'] }
-    ]
   },
 };
 

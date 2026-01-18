@@ -1,6 +1,6 @@
 {
   "name": "outlook-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "server/index.js",
   "type": "module",
   "scripts": {
