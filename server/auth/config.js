@@ -15,7 +15,7 @@ export const authConfig = {
       'Tasks.Read',
       'Tasks.ReadWrite',
       'User.Read',
-      'MailboxSettings.Read',
+      'MailboxSettings.ReadWrite',
       // SharePoint and OneDrive access
       'Sites.Read.All',         // Read all SharePoint sites
       'Sites.ReadWrite.All',    // Read/write all SharePoint sites

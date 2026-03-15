@@ -173,18 +173,22 @@ export const searchEmailsSchema = {
 
 export const createDraftSchema = {
   name: 'outlook_create_draft',
-  description: 'Create an email draft without sending',
+  description: 'Create an email draft without sending. When replyToMessageId is provided, creates a reply draft that preserves the thread/conversation context (to and subject are auto-populated from the original email). Use outlook_add_attachment afterward to attach files to the draft.',
   inputSchema: {
     type: 'object',
     properties: {
+      replyToMessageId: {
+        type: 'string',
+        description: 'If set, creates a reply draft to this message ID preserving thread context. When provided, to and subject are optional (auto-populated from the original email).',
+      },
       to: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Recipient email addresses',
+        description: 'Recipient email addresses. Required when not replying (replyToMessageId not set).',
       },
       subject: {
         type: 'string',
-        description: 'Email subject',
+        description: 'Email subject. Required when not replying (replyToMessageId not set).',
       },
       body: {
         type: 'string',
@@ -212,8 +216,12 @@ export const createDraftSchema = {
         default: 'normal',
         description: 'Email importance level',
       },
+      preserveUserStyling: {
+        type: 'boolean',
+        description: 'Apply user\'s default Outlook styling, font preferences, and signature',
+        default: true,
+      },
     },
-    required: ['to', 'subject'],
   },
 };
 
