@@ -101,7 +101,11 @@ process.on('uncaughtException', (error) => {
       // SharePoint Tools
       getSharePointFileTool,
       listSharePointFilesTool,
-      resolveSharePointLinkTool
+      resolveSharePointLinkTool,
+      // Rules Tools
+      listRulesTool,
+      createRuleTool,
+      deleteRuleTool,
     } = tools;
 
     console.error('Debug: All required tools extracted successfully');
@@ -295,6 +299,15 @@ process.on('uncaughtException', (error) => {
 
           case 'outlook_resolve_sharepoint_link':
             return await resolveSharePointLinkTool(authManager, args);
+
+          case 'outlook_list_rules':
+            return await listRulesTool(authManager, args);
+
+          case 'outlook_create_rule':
+            return await createRuleTool(authManager, args);
+
+          case 'outlook_delete_rule':
+            return await deleteRuleTool(authManager, args);
 
           default:
             return createProtocolError(

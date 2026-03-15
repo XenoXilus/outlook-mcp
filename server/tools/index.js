@@ -67,3 +67,6 @@ export { getRateLimitMetricsTool, resetRateLimitMetricsTool } from './common/rat
 
 // SharePoint tools
 export { getSharePointFileTool, listSharePointFilesTool, resolveSharePointLinkTool } from './sharepoint/getSharePointFile.js';
+
+// Rules tools
+export { listRulesTool, createRuleTool, deleteRuleTool } from './rules/manageRules.js';
