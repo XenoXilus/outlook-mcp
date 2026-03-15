@@ -34,13 +34,15 @@ export async function createDraftTool(authManager, args) {
     if (replyToMessageId) {
       // Create a reply draft preserving thread/conversation context
       const replyPayload = {};
-      if (finalBody) {
-        replyPayload.message = {
-          body: {
+      // Build message object whenever there is a body or recipient overrides to apply
+      if (finalBody || (to && to.length > 0) || cc.length > 0 || bcc.length > 0) {
+        replyPayload.message = {};
+        if (finalBody) {
+          replyPayload.message.body = {
             contentType: finalBodyType === 'html' ? 'HTML' : 'Text',
             content: finalBody,
-          },
-        };
+          };
+        }
         // Allow overriding additional recipients if explicitly provided
         if (to && to.length > 0) {
           replyPayload.message.toRecipients = to.map(email => ({

@@ -216,6 +216,11 @@ export const createDraftSchema = {
         default: 'normal',
         description: 'Email importance level',
       },
+      preserveUserStyling: {
+        type: 'boolean',
+        description: 'Apply user\'s default Outlook styling, font preferences, and signature',
+        default: true,
+      },
     },
   },
 };
