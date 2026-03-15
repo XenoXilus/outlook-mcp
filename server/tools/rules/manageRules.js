@@ -7,6 +7,12 @@ export async function listRulesTool(authManager, args) {
     const graphApiClient = authManager.getGraphApiClient();
 
     const result = await graphApiClient.makeRequest('/me/mailFolders/inbox/messageRules', {}, 'GET');
+
+    // Propagate MCP error responses returned by makeRequest (e.g. 4xx/5xx from Graph API)
+    if (result.content && result.isError !== undefined) {
+      return result;
+    }
+
     const rules = result.value || [];
 
     if (rules.length === 0) {
