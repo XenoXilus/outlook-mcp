@@ -188,13 +188,17 @@ export const createDraftSchema = {
       },
       body: {
         type: 'string',
-        description: 'Email body content',
+        description: 'Email body content. Use with bodyType. Mutually exclusive with bodyHtml.',
       },
       bodyType: {
         type: 'string',
         enum: ['text', 'html'],
         default: 'text',
         description: 'Body content type',
+      },
+      bodyHtml: {
+        type: 'string',
+        description: 'HTML email body — alias for body + bodyType: "html". Provide either bodyHtml or body, not both.',
       },
       cc: {
         type: 'array',
@@ -211,6 +215,11 @@ export const createDraftSchema = {
         enum: ['low', 'normal', 'high'],
         default: 'normal',
         description: 'Email importance level',
+      },
+      attachmentPaths: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Absolute local file paths to attach to the draft (up to 150 MB each; files over 3 MB are uploaded via a Graph upload session). The draft is staged for review — never auto-sent.',
       },
     },
     required: ['to', 'subject'],
