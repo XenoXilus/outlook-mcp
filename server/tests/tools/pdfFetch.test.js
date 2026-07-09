@@ -107,4 +107,80 @@ describe('pdfFetch', () => {
       .rejects.toThrow(/size/i);
     expect(arraySpy).not.toHaveBeenCalled();
   });
+
+  // Fix 1a: streaming oversize without Content-Length
+  it('streaming body: aborts early and rejects with size error before reading all chunks', async () => {
+    let cancelCalled = false;
+    let abortSignalled = false;
+    const chunk1 = new Uint8Array(10);
+    const chunk2 = new Uint8Array(10); // total 20 bytes > maxBytes:15
+    const reader = {
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: chunk1 })
+        .mockResolvedValueOnce({ done: false, value: chunk2 })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      cancel: vi.fn(() => { cancelCalled = true; })
+    };
+    const fetchImpl = (_url, opts) => {
+      opts.signal.addEventListener('abort', () => { abortSignalled = true; });
+      return Promise.resolve({
+        status: 200,
+        ok: true,
+        headers: { get: k => k === 'content-type' ? 'application/pdf' : null },
+        body: { getReader: () => reader }
+      });
+    };
+    await expect(fetchPdf('https://pay.stripe.com/x', { fetchImpl, maxBytes: 15 }))
+      .rejects.toThrow(/size/i);
+    // Reading must have stopped: either cancel was called or abort was signalled
+    expect(cancelCalled || abortSignalled).toBe(true);
+    // Must not have attempted a third read after the oversize was detected
+    expect(reader.read).toHaveBeenCalledTimes(2);
+  });
+
+  // Fix 1b: body-read timeout (timer must stay live past header arrival)
+  it('body-read phase: maps arrayBuffer AbortError to timed-out message', async () => {
+    let capturedSignal;
+    const fetchImpl = (_url, opts) => {
+      capturedSignal = opts.signal;
+      return Promise.resolve({
+        status: 200,
+        ok: true,
+        // No body.getReader — exercises the arrayBuffer() fallback path
+        headers: { get: k => k === 'content-type' ? 'application/pdf' : null },
+        arrayBuffer: () => new Promise((_, reject) => {
+          capturedSignal.addEventListener('abort', () => {
+            const err = new Error('The operation was aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        })
+      });
+    };
+    await expect(fetchPdf('https://pay.stripe.com/x', { fetchImpl, timeoutMs: 50 }))
+      .rejects.toThrow(/timed out/i);
+  }, 2000);
+
+  // Fix 1c: streaming happy path
+  it('streaming body: concatenates two chunks and validates PDF bytes', async () => {
+    const part1 = Buffer.from('%PDF-1.4 ');
+    const part2 = Buffer.from('fake content');
+    const expected = Buffer.concat([part1, part2]);
+    const reader = {
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array(part1) })
+        .mockResolvedValueOnce({ done: false, value: new Uint8Array(part2) })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      cancel: vi.fn()
+    };
+    const fetchImpl = vi.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      headers: { get: k => ({ 'content-type': 'application/pdf' })[k] ?? null },
+      body: { getReader: () => reader }
+    });
+    const res = await fetchPdf('https://pay.stripe.com/x', { fetchImpl });
+    expect(res.buffer.equals(expected)).toBe(true);
+    expect(res.finalUrl).toBe('https://pay.stripe.com/x');
+  });
 });

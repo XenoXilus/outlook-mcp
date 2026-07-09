@@ -56,34 +56,89 @@ export async function fetchPdf(urlString, options = {}) {
     try {
       response = await fetchImpl(current, { redirect: 'manual', signal: controller.signal });
     } catch (error) {
-      throw new Error(`Fetch failed for ${current}: ${error.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : error.message}`);
-    } finally {
       clearTimeout(timer);
+      throw new Error(`Fetch failed for ${current}: ${error.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : error.message}`);
     }
 
+    // Non-body paths: clear the timer immediately before continuing/throwing.
     if (REDIRECT_STATUSES.includes(response.status)) {
+      clearTimeout(timer);
       const location = response.headers.get('location');
       if (!location) throw new Error(`Redirect (${response.status}) without a Location header`);
       current = new URL(location, current).toString();
       continue;
     }
 
-    if (!response.ok) throw new Error(`Fetch failed with HTTP ${response.status} for ${current}`);
+    if (!response.ok) {
+      clearTimeout(timer);
+      throw new Error(`Fetch failed with HTTP ${response.status} for ${current}`);
+    }
 
     const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
     if (contentType !== 'application/pdf') {
+      clearTimeout(timer);
       throw new Error(`Expected Content-Type application/pdf, got '${contentType || 'none'}'`);
     }
 
     const declared = parseInt(response.headers.get('content-length') || '0', 10);
     if (declared > maxBytes) {
+      clearTimeout(timer);
       throw new Error(`PDF exceeds maximum size: ${declared} bytes > ${maxBytes} bytes`);
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > maxBytes) {
-      throw new Error(`PDF exceeds maximum size: ${buffer.length} bytes > ${maxBytes} bytes`);
+    // Body-read phase: keep the timer live so a slow body is still bounded in
+    // time.  The finally clears it once the body is fully consumed (or on any
+    // error path — including the size-exceeded throw below).
+    let buffer;
+    try {
+      if (response.body?.getReader) {
+        // Incremental size enforcement: reject the moment we exceed maxBytes
+        // rather than buffering the whole body first.
+        const reader = response.body.getReader();
+        const chunks = [];
+        let totalBytes = 0;
+        while (true) {
+          let readResult;
+          try {
+            readResult = await reader.read();
+          } catch (err) {
+            if (err.name === 'AbortError') {
+              throw new Error(`Fetch failed for ${current}: timed out after ${timeoutMs}ms`);
+            }
+            throw err;
+          }
+          const { done, value } = readResult;
+          if (done) break;
+          totalBytes += value.length;
+          if (totalBytes > maxBytes) {
+            controller.abort();
+            try { reader.cancel(); } catch (_) { /* ignore */ }
+            throw new Error(`PDF exceeds maximum size: ${totalBytes} bytes > ${maxBytes} bytes`);
+          }
+          chunks.push(value);
+        }
+        buffer = Buffer.concat(chunks.map(c => Buffer.from(c)));
+      } else {
+        // Fallback for environments / mocks that expose only arrayBuffer().
+        // The timer is still live, so a slow body will be aborted.
+        let ab;
+        try {
+          ab = await response.arrayBuffer();
+        } catch (err) {
+          if (err.name === 'AbortError') {
+            throw new Error(`Fetch failed for ${current}: timed out after ${timeoutMs}ms`);
+          }
+          throw err;
+        }
+        buffer = Buffer.from(ab);
+        if (buffer.length > maxBytes) {
+          throw new Error(`PDF exceeds maximum size: ${buffer.length} bytes > ${maxBytes} bytes`);
+        }
+      }
+    } finally {
+      clearTimeout(timer);
     }
+
     if (!isPdfBuffer(buffer)) {
       throw new Error('Fetched content does not start with %PDF magic bytes');
     }

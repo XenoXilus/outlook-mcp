@@ -73,6 +73,17 @@ describe('receiptParser', () => {
     expect(extractBillingPdfUrl('<a href="https://evil.example.com/x.pdf">x</a>', ALLOWLIST)).toBeNull();
   });
 
+  // Fix 3: HTML-entity decode in extractBillingPdfUrl
+  it('decodes &amp; HTML entity in extracted billing PDF URLs', () => {
+    const html = '<a href="https://pay.stripe.com/x?a=1&amp;b=2">Invoice</a>';
+    expect(extractBillingPdfUrl(html, ALLOWLIST)).toBe('https://pay.stripe.com/x?a=1&b=2');
+  });
+
+  it('single-param billing URLs pass through without modification', () => {
+    const html = '<a href="https://pay.stripe.com/x?token=abc123">Invoice</a>';
+    expect(extractBillingPdfUrl(html, ALLOWLIST)).toBe('https://pay.stripe.com/x?token=abc123');
+  });
+
   it('selects the Invoice-*.pdf when a message has Invoice + Receipt PDFs', () => {
     const attachments = [
       { id: 'a1', name: 'Receipt-4242-1337-0001.pdf', contentType: 'application/pdf', isInline: false },

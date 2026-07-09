@@ -243,6 +243,21 @@ describe('saveAttachmentTool (FR-1)', () => {
     expect(fs.readFileSync(out.savedPath).toString('base64')).toBe(XLSX_B64);
   });
 
+  // Fix 2: hard-error when RECEIPT_RULES_PATH is set but file is missing
+  it('returns isError when RECEIPT_RULES_PATH points to a nonexistent file', async () => {
+    const savedRules = process.env.RECEIPT_RULES_PATH;
+    try {
+      process.env.RECEIPT_RULES_PATH = '/tmp/__nonexistent_outlook_mcp_rules_xyz__.json';
+      const res = await saveAttachmentTool(authManager, { messageId: 'm1', fileName: 'x.pdf' });
+      expect(res.isError).toBe(true);
+      expect(res.content[0].text).toContain('RECEIPT_RULES_PATH');
+      expect(makeRequest).not.toHaveBeenCalled();
+    } finally {
+      if (savedRules === undefined) delete process.env.RECEIPT_RULES_PATH;
+      else process.env.RECEIPT_RULES_PATH = savedRules;
+    }
+  });
+
   it('response includes size, sha256, and absolute savedPath', async () => {
     makeRequest
       .mockResolvedValueOnce({ value: [

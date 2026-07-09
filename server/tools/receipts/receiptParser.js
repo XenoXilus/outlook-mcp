@@ -59,7 +59,11 @@ export function extractProductLabel(text, productLabels = []) {
 
 export function extractBillingPdfUrl(html, allowlist) {
   const urls = (html || '').match(/https:\/\/[^\s"'<>)]+/g) || [];
-  const allowed = urls.filter(u => {
+  // Decode the two most common ampersand entities that appear in raw HTML href
+  // attributes — &amp; and its numeric synonym &#38; — so multi-param signed
+  // URLs (e.g. Stripe pre-signed links) are returned with valid & separators.
+  const decoded = urls.map(u => u.replace(/&amp;/g, '&').replace(/&#38;/g, '&'));
+  const allowed = decoded.filter(u => {
     try {
       return allowlist.includes(new URL(u).hostname.toLowerCase());
     } catch {
