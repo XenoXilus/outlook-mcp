@@ -1,10 +1,11 @@
 {
   "name": "outlook-mcp",
-  "version": "1.0.1",
+  "version": "1.1.1",
   "main": "server/index.js",
   "type": "module",
   "scripts": {
     "start": "node server/index.js",
+    "auth:bootstrap": "node server/auth/bootstrap.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:benchmark": "vitest run server/tests/utils/LRUCache.benchmark.js",
