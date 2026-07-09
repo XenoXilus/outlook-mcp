@@ -1,6 +1,7 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
 import { createSafeResponse } from '../../utils/jsonUtils.js';
 import { stripHtml, truncateText } from '../../utils/textUtils.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 // Search emails with intelligent KQL/OData strategy selection
 export async function searchEmailsTool(authManager, args) {
@@ -26,6 +27,7 @@ export async function searchEmailsTool(authManager, args) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase();
 
     const options = {
       top: Math.min(effectiveLimit, 1000) // Cap at 1000 for performance
@@ -51,23 +53,23 @@ export async function searchEmailsTool(authManager, args) {
     }
 
     // Determine search strategy and endpoint
-    let endpoint = '/me/messages';
+    let endpoint = `${mailboxBase}/messages`;
     let useKQLSearch = false;
     let useODataFilters = false;
     const isSpecificFolder = resolvedFolderIds.length === 1;
 
     if (isSpecificFolder) {
       // Single folder search
-      endpoint = `/me/mailFolders/${resolvedFolderIds[0]}/messages`;
+      endpoint = `${mailboxBase}/mailFolders/${resolvedFolderIds[0]}/messages`;
       useODataFilters = true;
     } else if (resolvedFolderIds.length > 1) {
       // Multiple folders - we'll need to make separate requests and combine
       // For now, fall back to all folders search
-      endpoint = '/me/messages';
+      endpoint = `${mailboxBase}/messages`;
       useODataFilters = true;
     } else {
       // All folders search (folders.length === 0)
-      endpoint = '/me/messages';
+      endpoint = `${mailboxBase}/messages`;
 
       // Decide between KQL search and OData filters
       if (query) {

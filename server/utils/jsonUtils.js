@@ -4,21 +4,37 @@
  */
 
 /**
- * Safely stringify an object, handling circular references and undefined values
+ * Regex that matches key names whose values should be redacted from logs.
+ * Covers tokens, credentials, headers, and other common secret key names.
+ * Does NOT match bare "code", "statusCode", or "errorCode" — those carry
+ * diagnostic strings (e.g. ErrorInvalidRequest) that must remain visible.
+ */
+const REDACT_KEY_RE = /(token|secret|password|authorization|bearer|cookie|session|api[-_]?key|assertion|code_verifier)/i;
+
+/**
+ * Safely stringify an object, handling circular references and undefined values.
+ * Values under secret-named keys (see REDACT_KEY_RE) are replaced with "[REDACTED]"
+ * at any nesting depth, including objects/arrays under those keys.
  * @param {*} obj - Object to stringify
  * @param {number} space - Number of spaces for indentation (default: 2)
  * @returns {string} Safely stringified JSON
  */
 export function safeStringify(obj, space = 2) {
   const seen = new WeakSet();
-  
+
   try {
     return JSON.stringify(obj, (key, value) => {
+      // Redact values under secret-named keys at any nesting depth.
+      // The root call uses key === '' — never redact the root itself.
+      if (key !== '' && REDACT_KEY_RE.test(key)) {
+        return '[REDACTED]';
+      }
+
       // Handle undefined values
       if (value === undefined) {
         return null;
       }
-      
+
       // Handle circular references
       if (typeof value === 'object' && value !== null) {
         if (seen.has(value)) {
@@ -26,22 +42,22 @@ export function safeStringify(obj, space = 2) {
         }
         seen.add(value);
       }
-      
+
       // Handle functions (shouldn't be in API responses, but just in case)
       if (typeof value === 'function') {
         return '[Function]';
       }
-      
+
       // Handle symbols
       if (typeof value === 'symbol') {
         return value.toString();
       }
-      
+
       // Handle BigInt
       if (typeof value === 'bigint') {
         return value.toString();
       }
-      
+
       return value;
     }, space);
   } catch (error) {

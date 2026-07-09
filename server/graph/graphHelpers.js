@@ -598,3 +598,12 @@ export const graphHelpers = {
     },
   },
 };
+/**
+ * Mailbox base path for Graph mail requests (FR-5).
+ * Set MCP_OUTLOOK_SHARED_MAILBOX to read a delegated/shared mailbox;
+ * defaults to the authenticated user's own mailbox.
+ */
+export function getMailboxBase() {
+  const shared = (process.env.MCP_OUTLOOK_SHARED_MAILBOX || '').trim();
+  return shared ? `/users/${encodeURIComponent(shared)}` : '/me';
+}

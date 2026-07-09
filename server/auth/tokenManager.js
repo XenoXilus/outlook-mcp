@@ -44,7 +44,7 @@ export class TokenManager {
     if (this.storageInitialized) return;
 
     await storage.init({
-      dir: path.join(__dirname, '../../.tokens'),
+      dir: (process.env.MCP_OUTLOOK_REFRESH_TOKEN_PATH || '').trim() || path.join(__dirname, '../../.tokens'),
       logging: false,
     });
 
@@ -277,6 +277,15 @@ export class TokenManager {
     } catch (error) {
       // For isAuthenticated, we just return false instead of throwing
       // as this is used for checking authentication status
+      return false;
+    }
+  }
+
+  async hasRefreshToken() {
+    try {
+      await this.getRefreshToken();
+      return true;
+    } catch {
       return false;
     }
   }

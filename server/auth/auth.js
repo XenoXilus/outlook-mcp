@@ -45,6 +45,11 @@ export class OutlookAuthManager {
     });
   }
 
+  getAuthMode() {
+    const mode = (process.env.MCP_OUTLOOK_AUTH_MODE || 'interactive').toLowerCase();
+    return mode === 'headless' ? 'headless' : 'interactive';
+  }
+
   async authenticate() {
     try {
       const isTokenValid = await this.tokenManager.isAuthenticated();
@@ -52,6 +57,35 @@ export class OutlookAuthManager {
       if (isTokenValid) {
         await this.initializeGraphClient();
         return await this.validateAuthentication();
+      }
+
+      // Access token missing/expired: try a silent refresh before anything interactive
+      if (await this.tokenManager.hasRefreshToken()) {
+        try {
+          await this.refreshAccessToken();
+          return await this.validateAuthentication();
+        } catch (refreshError) {
+          if (this.getAuthMode() === 'headless') {
+            return {
+              success: false,
+              error: createAuthError(
+                `Headless mode: silent token refresh failed (${refreshError?.message || 'unknown error'}). ` +
+                'Re-run the interactive bootstrap on this machine: npm run auth:bootstrap',
+                false
+              ),
+            };
+          }
+          console.error('Silent refresh failed, falling back to interactive auth:', refreshError?.message || refreshError);
+        }
+      } else if (this.getAuthMode() === 'headless') {
+        return {
+          success: false,
+          error: createAuthError(
+            'Headless mode: no refresh token is seeded. Run the interactive bootstrap once: npm run auth:bootstrap ' +
+            '(optionally point MCP_OUTLOOK_REFRESH_TOKEN_PATH at the seeded token directory).',
+            false
+          ),
+        };
       }
 
       // Use interactive authentication with PKCE for delegated access
@@ -443,7 +477,11 @@ export class OutlookAuthManager {
       return true;
     } catch (error) {
       console.error('Token refresh failed:', error);
-      await this.tokenManager.clearTokens();
+      // Only clear the stored tokens when the refresh token itself is dead —
+      // a transient network failure must not destroy the seeded refresh token
+      if (String(error?.message || '').includes('invalid_grant')) {
+        await this.tokenManager.clearTokens();
+      }
       if (error.isError) {
         // Already an MCP error, re-throw as-is
         throw error;

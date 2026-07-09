@@ -151,6 +151,51 @@ Personal Microsoft accounts can also register apps in Azure:
 | `AZURE_CLIENT_ID` | Yes | Your Azure AD application client ID |
 | `AZURE_TENANT_ID` | Yes | Your Azure AD directory (tenant) ID |
 | `MCP_OUTLOOK_WORK_DIR` | No | Directory for saving large files (defaults to system temp) |
+| `MCP_OUTLOOK_ALLOWED_WRITE_DIRS` | No | Comma-separated extra directories save tools may write into when given an explicit `destDir`. Permission only — defaults are unchanged |
+| `MCP_OUTLOOK_SHARED_MAILBOX` | No | Delegated/shared mailbox to read; empty = own mailbox |
+
+The desktop extension (DXT) exposes only the mail settings above. The receipt/invoice-run behaviour below is configured **by the calling process** (e.g. a scheduled routine's MCP server config) via environment variables — it is intentionally not part of the extension settings UI:
+
+| Variable | Description |
+|----------|-------------|
+| `MCP_OUTLOOK_RECEIPTS_DIR` | Directory where receipt/invoice PDFs are saved (falls back to work dir). Also passable per-call as `destDir`. |
+| `RECEIPT_RULES_PATH` | Optional JSON file of site-specific vendor rules (see below). Unset = generic heuristics only. If set but missing/invalid, receipt tools fail fast rather than silently degrade. |
+| `BILLING_DOMAIN_ALLOWLIST` | Comma-separated hosts `outlook_fetch_billing_pdf` may contact (default: `pay.stripe.com,invoice.stripe.com,files.stripe.com,m.stripe.network`) |
+| `RECEIPT_FILENAME_TEMPLATE` | Receipt naming pattern (default: `{vendor} {DDMmmYY} Invoice.pdf`). Also passable per-vendor as `filenameTemplate`. |
+| `MCP_OUTLOOK_AUTH_MODE` | `interactive` (default) or `headless` — headless never opens a browser and fails fast if silent refresh is impossible |
+| `MCP_OUTLOOK_REFRESH_TOKEN_PATH` | Directory of the encrypted token store for headless runs (defaults to the built-in store) |
+| `MCP_OUTLOOK_CHROME_PATH` | Chrome/Chromium binary for `outlook_render_email_pdf` (auto-detected when unset) |
+
+#### Vendor rules (`RECEIPT_RULES_PATH`)
+
+`outlook_extract_receipt` / `outlook_collect_receipts` work with zero configuration for
+receipts issued via payment processors that put the vendor in the subject line
+("Your receipt from Acme #1234"). For senders that need explicit mapping, or to
+capture product labels, point `RECEIPT_RULES_PATH` at a JSON file
+(see [`receipt-rules.example.json`](receipt-rules.example.json)):
+
+- `vendorSenders`: `[{ "pattern": "<case-insensitive regex on the from address>", "vendor": "<name>" }]` — checked before the subject heuristic.
+- `productLabels`: `["<case-insensitive regex>", ...]` — first match becomes `productLabel`; without rules it is `null`.
+
+### Receipt & Invoice-Run Tools (v1.1)
+
+Five tools support autonomous expense-receipt collection (e.g. a scheduled monthly invoice run):
+
+| Tool | Purpose |
+|------|---------|
+| `outlook_save_attachment` | Save an attachment's **original bytes** to a chosen path/filename. Auto-selects the `Invoice-*.pdf` when a Stripe receipt attaches both Invoice and Receipt PDFs (`prefer: invoice\|receipt\|first`). Validates `%PDF` magic bytes; returns path + SHA-256 + size. |
+| `outlook_fetch_billing_pdf` | Fetch the PDF behind a billing link in an email body (fallback when a forward loses its attachment). HTTPS-only, allowlist-only (redirects included), content-type + magic-byte validated, 25 MB / 30 s bounded. |
+| `outlook_extract_receipt` | Compact structured summary of a receipt email (vendor, amount, currency, receipt/invoice numbers, product label, billing link, attachment ids) — never the 60 KB+ HTML body. |
+| `outlook_render_email_pdf` | Render the sanitised email HTML to PDF via headless Chrome — audit-trail fallback for receipts with no attachment and no link (e.g. app-store order receipts). |
+| `outlook_collect_receipts` | One call per period: discovers each vendor's receipts by sender/subject/date across the whole mailbox, saves every PDF (attachment → link → rendered fallback), and returns a manifest plus `missing[]`. Idempotent re-runs via `onExisting: skip\|overwrite\|version`. |
+
+`outlook_create_draft` additionally accepts `attachmentPaths` (absolute local file paths, ≤ 3 MB each) and returns the draft's `webLink` — it stages the email for review and **never sends**.
+
+### Headless (Scheduled) Runs
+
+1. Seed tokens once, interactively: `npm run auth:bootstrap` (opens the browser PKCE flow and stores an encrypted refresh token).
+2. Set `MCP_OUTLOOK_AUTH_MODE=headless` for the scheduled run. The server refreshes silently and **never launches a browser**; if re-consent is genuinely required it fails fast with an actionable error telling you to re-run the bootstrap.
+3. Optionally set `MCP_OUTLOOK_REFRESH_TOKEN_PATH` to point the run at a specific token store directory.
 
 ### Large File Handling
 

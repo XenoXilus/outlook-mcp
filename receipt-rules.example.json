@@ -1,0 +1,10 @@
+{
+  "vendorSenders": [
+    { "pattern": "billing@acme\\.example$", "vendor": "Acme" },
+    { "pattern": "no-reply@globex\\.example$", "vendor": "Globex" }
+  ],
+  "productLabels": [
+    "Pro plan[^\\n<,£$€]*",
+    "Team seat[^\\n<,£$€]*"
+  ]
+}
