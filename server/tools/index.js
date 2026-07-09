@@ -67,3 +67,10 @@ export { getRateLimitMetricsTool, resetRateLimitMetricsTool } from './common/rat
 
 // SharePoint tools
 export { getSharePointFileTool, listSharePointFilesTool, resolveSharePointLinkTool } from './sharepoint/getSharePointFile.js';
+
+// Receipt/invoice-run tools
+export { saveAttachmentTool } from './receipts/saveAttachment.js';
+export { fetchBillingPdfTool } from './receipts/fetchBillingPdf.js';
+export { extractReceiptTool } from './receipts/extractReceipt.js';
+export { renderEmailPdfTool } from './receipts/renderEmailPdf.js';
+export { collectReceiptsTool } from './receipts/collectReceipts.js';

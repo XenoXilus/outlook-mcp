@@ -24,6 +24,11 @@ process.on('uncaughtException', (error) => {
     console.error('Debug: Loading dotenv...');
     await import('dotenv/config');
 
+    // Must load before any module that imports officeparser (pdfjs-dist needs
+    // browser globals under Electron utilityProcess — see utils/electronCompat.js)
+    console.error('Debug: Loading Electron compatibility shims...');
+    await import('./utils/electronCompat.js');
+
     console.error('Debug: Loading MCP SDK...');
     const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
     const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
@@ -101,7 +106,13 @@ process.on('uncaughtException', (error) => {
       // SharePoint Tools
       getSharePointFileTool,
       listSharePointFilesTool,
-      resolveSharePointLinkTool
+      resolveSharePointLinkTool,
+      // Receipt/Invoice-run Tools
+      saveAttachmentTool,
+      fetchBillingPdfTool,
+      extractReceiptTool,
+      renderEmailPdfTool,
+      collectReceiptsTool
     } = tools;
 
     console.error('Debug: All required tools extracted successfully');
@@ -110,7 +121,7 @@ process.on('uncaughtException', (error) => {
     const server = new Server(
       {
         name: 'outlook-mcp',
-        version: '1.0.0',
+        version: '1.1.0',
       },
       {
         capabilities: {
@@ -137,7 +148,7 @@ process.on('uncaughtException', (error) => {
         },
         serverInfo: {
           name: 'outlook-mcp',
-          version: '1.0.0',
+          version: '1.1.0',
         },
       };
 
@@ -286,6 +297,21 @@ process.on('uncaughtException', (error) => {
 
           case 'outlook_scan_attachments':
             return await scanAttachmentsTool(authManager, args);
+
+          case 'outlook_save_attachment':
+            return await saveAttachmentTool(authManager, args);
+
+          case 'outlook_fetch_billing_pdf':
+            return await fetchBillingPdfTool(authManager, args);
+
+          case 'outlook_extract_receipt':
+            return await extractReceiptTool(authManager, args);
+
+          case 'outlook_render_email_pdf':
+            return await renderEmailPdfTool(authManager, args);
+
+          case 'outlook_collect_receipts':
+            return await collectReceiptsTool(authManager, args);
 
           case 'outlook_get_sharepoint_file':
             return await getSharePointFileTool(authManager, args);

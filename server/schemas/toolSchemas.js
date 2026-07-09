@@ -25,10 +25,15 @@ import {
   attachmentSchemaMap 
 } from './attachmentSchemas.js';
 
-import { 
-  sharePointSchemas, 
-  sharePointSchemaMap 
+import {
+  sharePointSchemas,
+  sharePointSchemaMap
 } from './sharePointSchemas.js';
+
+import {
+  receiptSchemas,
+  receiptSchemaMap
+} from './receiptSchemas.js';
 
 /**
  * Complete array of all tool schemas
@@ -39,6 +44,7 @@ export const allToolSchemas = [
   ...folderSchemas,
   ...attachmentSchemas,
   ...sharePointSchemas,
+  ...receiptSchemas,
 ];
 
 /**
@@ -50,6 +56,7 @@ export const allToolSchemaMap = {
   ...folderSchemaMap,
   ...attachmentSchemaMap,
   ...sharePointSchemaMap,
+  ...receiptSchemaMap,
 };
 
 /**
@@ -61,6 +68,7 @@ export const schemasByCategory = {
   folder: folderSchemas,
   attachment: attachmentSchemas,
   sharepoint: sharePointSchemas,
+  receipts: receiptSchemas,
 };
 
 /**
@@ -72,6 +80,7 @@ export const schemaMaps = {
   folder: folderSchemaMap,
   attachment: attachmentSchemaMap,
   sharepoint: sharePointSchemaMap,
+  receipts: receiptSchemaMap,
 };
 
 /**
@@ -174,7 +183,12 @@ export {
   attachmentSchemaMap 
 } from './attachmentSchemas.js';
 
-export { 
-  sharePointSchemas, 
-  sharePointSchemaMap 
+export {
+  sharePointSchemas,
+  sharePointSchemaMap
 } from './sharePointSchemas.js';
+
+export {
+  receiptSchemas,
+  receiptSchemaMap
+} from './receiptSchemas.js';
