@@ -1,13 +1,23 @@
 *.test.js
 server/tests/
+server/test/
+server/tools/test/
 coverage/
 .env
 .env.local
+.env.*
+.tokens/
+server/.tokens/
 .git/
+.github/
 .gitignore
+.claude/
+.superpowers/
 node_modules/.cache/
 *.log
+*.dxt
 docs/
+outlook-mcp - Change Requirements*.md
 walkthrough.md
 audit_report.md
 implementation_plan.md

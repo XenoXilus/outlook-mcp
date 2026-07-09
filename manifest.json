@@ -1,7 +1,7 @@
 {
   "dxt_version": "0.1",
   "name": "outlook-mcp",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "Connects your LLM to the Outlook setup. Read and write emails, contacts, and calendar events. ",
   "author": {
     "name": "XenoXilus",
@@ -26,6 +26,20 @@
       "description": "Directory path where email attachments and files will be downloaded. Leave empty to use system temp directory.",
       "required": false,
       "default": ""
+    },
+    "allowed_write_directories": {
+      "type": "string",
+      "title": "Allowed Write Directories",
+      "description": "Comma-separated directories that save tools may write into when given an explicit destination (e.g. an expenses folder). Grants permission only — default downloads still go to the Download Directory.",
+      "required": false,
+      "default": ""
+    },
+    "shared_mailbox": {
+      "type": "string",
+      "title": "Shared Mailbox",
+      "description": "Delegated/shared mailbox to read (e.g. finance@yourcompany.com). Empty = own mailbox.",
+      "required": false,
+      "default": ""
     }
   },
   "server": {
@@ -39,7 +53,9 @@
       "env": {
         "AZURE_CLIENT_ID": "${user_config.azure_client_id}",
         "AZURE_TENANT_ID": "${user_config.azure_tenant_id}",
-        "MCP_OUTLOOK_WORK_DIR": "${user_config.download_directory}"
+        "MCP_OUTLOOK_WORK_DIR": "${user_config.download_directory}",
+        "MCP_OUTLOOK_ALLOWED_WRITE_DIRS": "${user_config.allowed_write_directories}",
+        "MCP_OUTLOOK_SHARED_MAILBOX": "${user_config.shared_mailbox}"
       }
     }
   },
