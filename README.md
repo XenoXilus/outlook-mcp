@@ -11,6 +11,7 @@ A Model Context Protocol (MCP) server that enables AI assistants to interact wit
 - **SharePoint Integration**: Access SharePoint files via sharing links or direct file IDs. Download files shared to you via emails. 
 - **Calendar Management**: View and manage calendar events and appointments
 - **Office Document Processing**: Parse PDF, Word, PowerPoint, and Excel files with extracted text content
+- **Receipt & Invoice Collection**: Discover emailed receipts by sender/subject/date, save them as verified and consistently named PDFs (attachment, billing link, or rendered fallback), and stage a review draft — built for scheduled, non-interactive runs
 - **Large File Support**: Automatic handling of files that exceed MCP response size limits
 
 ## Quick Start
@@ -228,6 +229,11 @@ Once installed, you can ask the AI assistant things like:
 - "Get the contents of this SharePoint link: [paste link]"
 - "What files were attached to emails from Legal this month?"
 
+**Receipts & Invoices**
+- "Collect all my June receipts into my receipts folder and give me the manifest"
+- "Save the invoice PDF from the latest Acme receipt email as 'Acme 29Jun26 Invoice.pdf'"
+- "Draft an email to my accountant with last month's receipt PDFs attached — don't send it"
+
 **Office Document Processing**
 
 The server automatically parses:
@@ -294,6 +300,7 @@ outlook-mcp/
 │   │   ├── calendar/         # Calendar tools
 │   │   ├── email/            # Email tools
 │   │   ├── folders/          # Folder management
+│   │   ├── receipts/         # Receipt/invoice-run tools
 │   │   └── sharepoint/       # SharePoint tools
 │   └── utils/                # Utility modules
 └── package.json
