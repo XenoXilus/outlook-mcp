@@ -4,6 +4,22 @@ import { convertErrorToToolError, createServiceUnavailableError, createRateLimit
 import { FolderResolver } from './folderResolver.js';
 import { safeStringify } from '../utils/jsonUtils.js';
 
+/**
+ * Percent-encode the characters that corrupt an OData query value on the wire.
+ * The Graph SDK appends $filter/$search values to the URL verbatim, and the
+ * service decodes a literal '+' in a query string as a space — so a filter on a
+ * plus-addressed sender (invoice+statements@...) silently matches nothing, and
+ * a literal '&' or '#' truncates the query. Spaces/quotes are already handled
+ * by WHATWG URL normalisation, so only these four need escaping.
+ */
+export function encodeODataQueryValue(value) {
+  return String(value)
+    .replace(/%/g, '%25')
+    .replace(/\+/g, '%2B')
+    .replace(/&/g, '%26')
+    .replace(/#/g, '%23');
+}
+
 export class GraphApiClient {
   constructor(authManager) {
     this.authManager = authManager;
@@ -187,7 +203,7 @@ export class GraphApiClient {
           request = request.top(options.top);
         }
         if (options.filter) {
-          request = request.filter(options.filter);
+          request = request.filter(encodeODataQueryValue(options.filter));
         }
         if (options.orderby) {
           request = request.orderby(options.orderby);
@@ -196,7 +212,7 @@ export class GraphApiClient {
           request = request.expand(options.expand);
         }
         if (options.search) {
-          request = request.search(options.search);
+          request = request.search(encodeODataQueryValue(options.search));
         }
         if (options.startDateTime && options.endDateTime) {
           request = request.query({

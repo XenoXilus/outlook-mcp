@@ -1,7 +1,7 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
 import { createSafeResponse } from '../../utils/jsonUtils.js';
 import { stripHtml, truncateText } from '../../utils/textUtils.js';
-import { getMailboxBase } from '../../graph/graphHelpers.js';
+import { getMailboxBase, toStartDateTime, endDateFilterClause } from '../../graph/graphHelpers.js';
 
 // Search emails with intelligent KQL/OData strategy selection
 export async function searchEmailsTool(authManager, args) {
@@ -88,25 +88,27 @@ export async function searchEmailsTool(authManager, args) {
 
       // For Microsoft Graph API compatibility with $orderby, we need receivedDateTime in $filter
       // when using receivedDateTime in $orderby. Add it first to match orderby priority.
+      // Date-only bounds are expanded so the window covers the whole final day:
+      // a bare `le 2026-08-31` means midnight and silently drops the 31st.
       if (orderBy && orderBy.includes('receivedDateTime')) {
         if (startDate) {
-          filterConditions.push(`receivedDateTime ge ${startDate}`);
+          filterConditions.push(`receivedDateTime ge ${toStartDateTime(startDate)}`);
         } else {
           // Add a broad receivedDateTime filter to satisfy API requirements
           filterConditions.push(`receivedDateTime ge 1900-01-01T00:00:00Z`);
         }
 
         if (endDate) {
-          filterConditions.push(`receivedDateTime le ${endDate}`);
+          filterConditions.push(endDateFilterClause(endDate));
         }
       } else {
         // Add date filters normally if not using receivedDateTime orderby
         if (startDate) {
-          filterConditions.push(`receivedDateTime ge ${startDate}`);
+          filterConditions.push(`receivedDateTime ge ${toStartDateTime(startDate)}`);
         }
 
         if (endDate) {
-          filterConditions.push(`receivedDateTime le ${endDate}`);
+          filterConditions.push(endDateFilterClause(endDate));
         }
       }
 

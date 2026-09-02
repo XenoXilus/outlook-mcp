@@ -145,5 +145,48 @@ describe('Email Tools Redesign', () => {
             expect(content.emails[0].body.content.length).toBeLessThan(2000);
             expect(content.emails[0].truncated).toBe(true);
         });
+
+        // A date-only endDate used to be sent as `le 2026-08-31`, which Graph
+        // reads as midnight — silently dropping the whole last day.
+        it('expands a date-only endDate to a half-open bound covering the full day', async () => {
+            mockGraphApiClient.makeRequest.mockResolvedValue({ value: [] });
+
+            await searchEmailsTool(mockAuthManager, {
+                subject: 'receipt',
+                startDate: '2026-08-01',
+                endDate: '2026-08-31'
+            });
+
+            const options = mockGraphApiClient.makeRequest.mock.calls[0][1];
+            expect(options.filter).toContain('receivedDateTime ge 2026-08-01T00:00:00Z');
+            expect(options.filter).toContain('receivedDateTime lt 2026-09-01T00:00:00Z');
+            expect(options.filter).not.toContain('le 2026-08-31');
+        });
+
+        it('handles month-end rollover for date-only endDate in December', async () => {
+            mockGraphApiClient.makeRequest.mockResolvedValue({ value: [] });
+
+            await searchEmailsTool(mockAuthManager, {
+                subject: 'receipt',
+                endDate: '2026-12-31'
+            });
+
+            const options = mockGraphApiClient.makeRequest.mock.calls[0][1];
+            expect(options.filter).toContain('receivedDateTime lt 2027-01-01T00:00:00Z');
+        });
+
+        it('leaves explicit date-time bounds untouched', async () => {
+            mockGraphApiClient.makeRequest.mockResolvedValue({ value: [] });
+
+            await searchEmailsTool(mockAuthManager, {
+                subject: 'receipt',
+                startDate: '2026-08-01T00:00:00Z',
+                endDate: '2026-08-31T23:59:59Z'
+            });
+
+            const options = mockGraphApiClient.makeRequest.mock.calls[0][1];
+            expect(options.filter).toContain('receivedDateTime ge 2026-08-01T00:00:00Z');
+            expect(options.filter).toContain('receivedDateTime le 2026-08-31T23:59:59Z');
+        });
     });
 });

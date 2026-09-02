@@ -192,6 +192,22 @@ Five tools support autonomous expense-receipt collection (e.g. a scheduled month
 
 `outlook_create_draft` additionally accepts `attachmentPaths` (absolute local file paths, ≤ 3 MB each) and returns the draft's `webLink` — it stages the email for review and **never sends**.
 
+Receipt matching notes (v1.2):
+
+- A vendor rule's `from` and `subjectContains` combine as **OR** — either signal
+  matches a receipt, and each manifest entry reports `matchedBy`
+  (`from`, `from-normalised`, and/or `subject`).
+- Plus-addressed senders (`invoice+statements+acct_...@stripe.com`) match both
+  exactly and via a plus-stripped fallback: when an exact `from` finds nothing,
+  the collector retries on the base local part and keeps only messages whose
+  normalised sender matches, noting `searchNote` in the manifest.
+- `periodStart`/`periodEnd` (and `outlook_search_emails`' `startDate`/`endDate`)
+  accept bare dates: `2026-08-31` as an end covers the **whole** last day
+  instead of stopping at midnight.
+- `outlook_download_attachment` accepts `saveToFile`/`destDir`/`fileName`/`onExisting`
+  to write raw bytes server-side and return only `{savedPath, size, sha256}` —
+  use this for real invoice PDFs instead of inline base64.
+
 ### Headless (Scheduled) Runs
 
 1. Seed tokens once, interactively: `npm run auth:bootstrap` (opens the browser PKCE flow and stores an encrypted refresh token).
@@ -200,7 +216,7 @@ Five tools support autonomous expense-receipt collection (e.g. a scheduled month
 
 ### Large File Handling
 
-When downloading large attachments or SharePoint files, the server automatically detects when the response would exceed the MCP 1MB limit and saves the content to local files instead.
+When downloading large attachments or SharePoint files, the server automatically detects when the response would exceed the MCP response cap (~30k characters by default — the practical tool-output token budget; override with `MCP_OUTLOOK_MAX_RESPONSE_CHARS`) and saves the content to local files instead.
 
 - If `MCP_OUTLOOK_WORK_DIR` is set, large files are saved to this directory
 - If not set, files are saved to the system temp directory

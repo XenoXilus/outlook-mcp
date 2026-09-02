@@ -336,6 +336,110 @@ describe('collectReceiptsTool (FR-6)', () => {
     }
   });
 
+  // --- from-matching resilience ---
+
+  it('combines from and subjectContains with OR so a sender mismatch cannot hide a subject hit', async () => {
+    makeRequest
+      .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })
+      .mockResolvedValueOnce(STRIPE_FULL('m1', '2026-06-29T07:12:00Z'))
+      .mockResolvedValueOnce(ATTACHMENT_LIST)
+      .mockResolvedValueOnce(ATTACHMENT_LIST)
+      .mockResolvedValueOnce(ATTACHMENT_FULL);
+
+    const res = await collectReceiptsTool(authManager, {
+      periodStart: '2026-06-01T00:00:00Z',
+      periodEnd: '2026-06-30T23:59:59Z',
+      vendors: [{ vendor: 'Acme', from: 'invoice+statements@mail.acme.com', subjectContains: 'receipt from Acme' }]
+    });
+
+    const [, options] = makeRequest.mock.calls[0];
+    expect(options.filter).toContain(
+      "(from/emailAddress/address eq 'invoice+statements@mail.acme.com' or contains(subject,'receipt from Acme'))"
+    );
+    const out = JSON.parse(res.content[0].text);
+    expect(out.manifest[0].status).toBe('saved');
+    expect(out.manifest[0].matchedBy).toContain('from');
+    expect(out.manifest[0].matchedBy).toContain('subject');
+  });
+
+  it('retries a zero-hit from rule with a plus-address-normalised sender fallback', async () => {
+    // Config says invoice@stripe.example; the real sender drifted to a plus tag.
+    const driftedHeader = {
+      id: 'm-drift', receivedDateTime: '2026-06-20T10:00:00Z', hasAttachments: true,
+      subject: 'Your receipt #123',
+      from: { emailAddress: { address: 'invoice+statements+acct_1@stripe.example' } }
+    };
+    const driftedFull = {
+      ...driftedHeader,
+      body: { contentType: 'html', content: '<p>Amount paid $12.53</p>' }
+    };
+
+    makeRequest
+      .mockResolvedValueOnce({ value: [] })              // exact-from search: nothing
+      .mockResolvedValueOnce({ value: [driftedHeader] }) // startswith fallback search
+      .mockResolvedValueOnce(driftedFull)                // extract: message
+      .mockResolvedValueOnce(ATTACHMENT_LIST)            // extract: attachments
+      .mockResolvedValueOnce(ATTACHMENT_LIST)            // save: list
+      .mockResolvedValueOnce(ATTACHMENT_FULL);           // save: full
+
+    const res = await collectReceiptsTool(authManager, {
+      periodStart: '2026-06-01T00:00:00Z',
+      periodEnd: '2026-06-30T23:59:59Z',
+      vendors: [{ vendor: 'Stripe', from: 'invoice@stripe.example' }]
+    });
+
+    const retryFilter = makeRequest.mock.calls[1][1].filter;
+    expect(retryFilter).toContain("startswith(from/emailAddress/address,'invoice')");
+
+    const out = JSON.parse(res.content[0].text);
+    const entry = out.manifest.find(e => e.vendor === 'Stripe');
+    expect(entry.status).toBe('saved');
+    expect(entry.matchedBy).toContain('from-normalised');
+    expect(entry.searchNote).toMatch(/plus-address/i);
+    expect(out.missing).toEqual([]);
+  });
+
+  it('fallback keeps only messages whose normalised sender really matches', async () => {
+    const strangerHeader = {
+      id: 'm-other', receivedDateTime: '2026-06-20T10:00:00Z', hasAttachments: true,
+      subject: 'Invoice attached',
+      from: { emailAddress: { address: 'invoice@shady.example' } }
+    };
+
+    makeRequest
+      .mockResolvedValueOnce({ value: [] })                // exact-from search
+      .mockResolvedValueOnce({ value: [strangerHeader] }); // fallback finds same local part, wrong domain
+
+    const res = await collectReceiptsTool(authManager, {
+      periodStart: '2026-06-01T00:00:00Z',
+      periodEnd: '2026-06-30T23:59:59Z',
+      vendors: [{ vendor: 'Stripe', from: 'invoice@stripe.example' }]
+    });
+
+    const out = JSON.parse(res.content[0].text);
+    expect(out.missing).toEqual(['Stripe']);
+    expect(out.manifest[0].status).toBe('missing');
+  });
+
+  // --- date windows: the last day of the month must be inside the window ---
+
+  it('accepts date-only period bounds and expands the end to cover the whole final day', async () => {
+    makeRequest
+      .mockResolvedValueOnce({ value: [] })
+      .mockResolvedValueOnce({ value: [] }); // sender fallback also empty
+
+    await collectReceiptsTool(authManager, {
+      periodStart: '2026-08-01',
+      periodEnd: '2026-08-31',
+      vendors: [{ vendor: 'Acme', from: 'billing@acme.example' }]
+    });
+
+    const [, options] = makeRequest.mock.calls[0];
+    expect(options.filter).toContain('receivedDateTime ge 2026-08-01T00:00:00Z');
+    expect(options.filter).toContain('receivedDateTime lt 2026-09-01T00:00:00Z');
+    expect(options.filter).not.toContain('le 2026-08-31');
+  });
+
   it('marks a vendor entry ambiguous (with error) when saving fails, and continues', async () => {
     makeRequest
       .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })

@@ -4,6 +4,24 @@ import * as XLSX from 'xlsx';
 import officeParser from 'officeparser';
 import { handleLargeContent, saveBase64File } from '../../utils/fileOutput.js';
 import { safeStringify, createSafeResponse } from '../../utils/jsonUtils.js';
+import { saveReceiptFile } from '../../utils/receiptFiles.js';
+
+// Proven-working $select for fetching attachment bytes. Graph rejects a select
+// that asks for the fileAttachment-only contentBytes without
+// lastModifiedDateTime/@odata.type alongside it (400 Bad Request).
+const CONTENT_SELECT = 'id,name,contentType,size,isInline,lastModifiedDateTime,contentBytes,@odata.type';
+
+// Cap for inline tool responses. The practical limit is the MCP client's
+// tool-output token budget (~25k tokens): a 37 KB PDF's inline base64 already
+// blows it, far below the old 1 MB message-size check.
+function getMaxInlineChars() {
+  return parseInt(process.env.MCP_OUTLOOK_MAX_RESPONSE_CHARS || '', 10) || 30000;
+}
+
+function throwIfMcpError(result) {
+  if (result && result.isError !== undefined && result.content) throw result;
+  return result;
+}
 
 // Helper function to format file size
 function formatFileSize(bytes) {
@@ -369,7 +387,10 @@ async function decodeAttachmentContent(contentBytes, contentType, filename, maxT
 
 // Download attachment
 export async function downloadAttachmentTool(authManager, args) {
-  const { messageId, attachmentId, includeContent = false, decodeContent = true } = args;
+  const {
+    messageId, attachmentId, includeContent = false, decodeContent = true,
+    saveToFile = false, destDir, fileName, onExisting = 'skip'
+  } = args;
 
   if (!messageId) {
     return createValidationError('messageId', 'Parameter is required');
@@ -386,9 +407,9 @@ export async function downloadAttachmentTool(authManager, args) {
     console.error(`Debug: Downloading attachment ${attachmentId} from message ${messageId}`);
 
     // First, get attachment metadata and type
-    const attachment = await graphApiClient.makeRequest(`/me/messages/${messageId}/attachments/${attachmentId}`, {
+    const attachment = throwIfMcpError(await graphApiClient.makeRequest(`/me/messages/${messageId}/attachments/${attachmentId}`, {
       select: 'id,name,contentType,size,isInline,lastModifiedDateTime,@odata.type'
-    });
+    }));
 
     console.error(`Debug: Attachment type: ${attachment['@odata.type']}, size: ${attachment.size}, contentType: "${attachment.contentType}"`);
 
@@ -403,6 +424,39 @@ export async function downloadAttachmentTool(authManager, args) {
       attachmentType: attachment['@odata.type']
     };
 
+    // File-delivery mode: write the raw bytes server-side and return only
+    // metadata — inline base64 must never be the only route for binary content.
+    if (saveToFile || destDir || fileName) {
+      const odataType = attachment['@odata.type'];
+      if (odataType === '#microsoft.graph.itemAttachment' || odataType === '#microsoft.graph.referenceAttachment') {
+        throw new Error(
+          `Attachment '${attachment.name}' is not a file attachment (${odataType}); ` +
+          'only file attachments can be saved to disk'
+        );
+      }
+
+      const full = throwIfMcpError(await graphApiClient.makeRequest(
+        `/me/messages/${messageId}/attachments/${attachmentId}`,
+        { select: CONTENT_SELECT }
+      ));
+      if (!full.contentBytes) {
+        throw new Error(`Attachment '${attachment.name}' has no contentBytes to save`);
+      }
+
+      const buffer = Buffer.from(full.contentBytes, 'base64');
+      const saved = await saveReceiptFile(buffer, destDir, fileName || attachment.name, { onExisting });
+
+      return createSafeResponse({
+        ...attachmentInfo,
+        savedToFile: true,
+        savedPath: saved.savedPath,
+        action: saved.action,
+        size: saved.size,
+        sizeFormatted: formatFileSize(saved.size),
+        sha256: saved.sha256
+      });
+    }
+
     if (includeContent) {
       try {
         console.error('Debug: Attempting to download attachment content...');
@@ -411,7 +465,7 @@ export async function downloadAttachmentTool(authManager, args) {
         if (attachment['@odata.type'] === '#microsoft.graph.fileAttachment') {
           // Standard file attachment - request with contentBytes
           const fullAttachment = await graphApiClient.makeRequest(`/me/messages/${messageId}/attachments/${attachmentId}`, {
-            select: 'id,name,contentType,size,isInline,lastModifiedDateTime,contentBytes,@odata.type'
+            select: CONTENT_SELECT
           });
           
           if (fullAttachment.contentBytes) {
@@ -546,10 +600,10 @@ export async function downloadAttachmentTool(authManager, args) {
 
     // Handle large content by saving to file if needed
     const responseText = safeStringify(attachmentInfo, 2);
-    const maxMcpResponseSize = 1048576; // 1MB MCP limit
-    
+    const maxMcpResponseSize = getMaxInlineChars();
+
     if (responseText.length > maxMcpResponseSize && attachmentInfo.contentBytes) {
-      console.log(`Response size (${formatFileSize(responseText.length)}) exceeds MCP limit, saving to file...`);
+      console.error(`Response size (${formatFileSize(responseText.length)}) exceeds MCP response cap, saving to file...`);
       
       // Save the Base64 content to file
       const fileResult = await saveBase64File(
@@ -567,7 +621,7 @@ export async function downloadAttachmentTool(authManager, args) {
           note: `Attachment content saved to file: ${fileResult.filePath}. Use the file path to access the full content.`,
           usage: {
             filePath: 'Use fileOutput.filePath to access the saved file',
-            originalContent: 'Large content automatically saved due to MCP 1MB limit',
+            originalContent: 'Large content automatically saved because inline base64 would exceed the MCP response cap',
             decoding: attachmentInfo.encoding === 'parsed' ? 'Content was parsed before saving' : 'Raw file saved as downloaded'
           }
         };
@@ -620,6 +674,25 @@ export async function downloadAttachmentTool(authManager, args) {
           ],
         };
       }
+    }
+
+    // No contentBytes to spill but the response is still oversized (e.g. a
+    // large parsed text or embedded item): truncate rather than blow the cap.
+    if (responseText.length > maxMcpResponseSize) {
+      const truncatedInfo = { ...attachmentInfo };
+      delete truncatedInfo.content;
+      delete truncatedInfo.itemContent;
+      truncatedInfo.contentTruncated = true;
+      truncatedInfo.note = `Response (${formatFileSize(responseText.length)}) exceeds the MCP response cap; ` +
+        'content omitted. Use saveToFile/destDir to write the attachment to disk instead.';
+      return {
+        content: [
+          {
+            type: 'text',
+            text: safeStringify(truncatedInfo, 2),
+          },
+        ],
+      };
     }
 
     return {

@@ -607,3 +607,35 @@ export function getMailboxBase() {
   const shared = (process.env.MCP_OUTLOOK_SHARED_MAILBOX || '').trim();
   return shared ? `/users/${encodeURIComponent(shared)}` : '/me';
 }
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Inclusive lower bound for a receivedDateTime filter. A bare date means
+ * midnight UTC at the start of that day; explicit date-times pass through.
+ */
+export function toStartDateTime(value) {
+  return DATE_ONLY.test(value) ? `${value}T00:00:00Z` : value;
+}
+
+/**
+ * Half-open upper bound for a receivedDateTime filter. Graph reads a bare
+ * `le 2026-08-31` as midnight, silently dropping the month's whole last day.
+ * For date-only input this returns midnight of the NEXT day for use with
+ * `lt`; explicit date-times return null so callers keep their `le` bound
+ * unchanged.
+ */
+export function toExclusiveEndDateTime(value) {
+  if (!DATE_ONLY.test(value)) return null;
+  const next = new Date(`${value}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return next.toISOString().replace('.000Z', 'Z');
+}
+
+/**
+ * Build the receivedDateTime upper-bound filter clause for either input form.
+ */
+export function endDateFilterClause(value) {
+  const exclusive = toExclusiveEndDateTime(value);
+  return exclusive ? `receivedDateTime lt ${exclusive}` : `receivedDateTime le ${value}`;
+}

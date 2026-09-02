@@ -22,7 +22,7 @@ export const listAttachmentsSchema = {
 
 export const downloadAttachmentSchema = {
   name: 'outlook_download_attachment',
-  description: 'Download a specific email attachment',
+  description: 'Download a specific email attachment. Set saveToFile (or destDir/fileName) to write the raw bytes server-side and get back only {savedPath, size, sha256} — the reliable route for binary files, since inline base64 exceeds the MCP response cap above ~20 KB.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -36,13 +36,32 @@ export const downloadAttachmentSchema = {
       },
       includeContent: {
         type: 'boolean',
-        description: 'Whether to include the file content',
+        description: 'Whether to include the file content inline (auto-saves to a file instead when the response would exceed the MCP response cap)',
         default: false,
       },
       decodeContent: {
         type: 'boolean',
         description: 'Whether to decode Base64 content to readable format (text files) or provide summary (binary files)',
         default: true,
+      },
+      saveToFile: {
+        type: 'boolean',
+        description: 'Write the attachment bytes to disk and return only file metadata (savedPath, size, sha256) — never inline base64',
+        default: false,
+      },
+      destDir: {
+        type: 'string',
+        description: 'Directory to save into (implies saveToFile). Must be inside the receipts/work directory or an allowed write directory; defaults to the receipts directory.',
+      },
+      fileName: {
+        type: 'string',
+        description: 'Filename to save as (implies saveToFile). Defaults to the attachment\'s own name.',
+      },
+      onExisting: {
+        type: 'string',
+        enum: ['skip', 'overwrite', 'version'],
+        description: 'What to do when the target file already exists (saveToFile mode)',
+        default: 'skip',
       },
     },
     required: ['messageId', 'attachmentId'],

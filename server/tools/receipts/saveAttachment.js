@@ -81,9 +81,12 @@ export async function saveAttachmentCore(graphApiClient, args, rules = loadRecei
     }
   }
 
+  // This select must stay byte-identical to downloadAttachment's proven shape:
+  // Graph rejects a $select that asks for the fileAttachment-only contentBytes
+  // without lastModifiedDateTime/@odata.type alongside it (400 Bad Request).
   const full = throwIfMcpError(await graphApiClient.makeRequest(
     `${base}/messages/${messageId}/attachments/${targetId}`,
-    { select: 'id,name,contentType,size,isInline,contentBytes' }
+    { select: 'id,name,contentType,size,isInline,lastModifiedDateTime,contentBytes,@odata.type' }
   ));
   if (!full.contentBytes) {
     throw new Error(`Attachment '${full.name || targetId}' has no contentBytes (not a file attachment)`);

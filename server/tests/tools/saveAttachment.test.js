@@ -258,6 +258,23 @@ describe('saveAttachmentTool (FR-1)', () => {
     }
   });
 
+  // Graph returns 400 for the attachment fetch when $select asks for
+  // contentBytes without the shape download_attachment uses. The content
+  // fetch must stay byte-identical to the proven-working download request.
+  it('fetches attachment content with the same $select shape download_attachment uses', async () => {
+    makeRequest
+      .mockResolvedValueOnce({ id: 'a9', name: 'Invoice.pdf', contentType: 'application/pdf', isInline: false, contentBytes: PDF_B64 });
+
+    const res = await saveAttachmentTool(authManager, {
+      messageId: 'm1', attachmentId: 'a9', fileName: 'out.pdf'
+    });
+    expect(res.isError).toBeUndefined();
+
+    const contentFetch = makeRequest.mock.calls.find(c => c[0] === '/me/messages/m1/attachments/a9');
+    expect(contentFetch).toBeDefined();
+    expect(contentFetch[1].select).toBe('id,name,contentType,size,isInline,lastModifiedDateTime,contentBytes,@odata.type');
+  });
+
   it('response includes size, sha256, and absolute savedPath', async () => {
     makeRequest
       .mockResolvedValueOnce({ value: [
