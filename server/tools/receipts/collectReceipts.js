@@ -78,7 +78,7 @@ function computeMatchedBy(rule, message) {
 }
 
 export async function collectReceiptsTool(authManager, args, deps = {}) {
-  const { periodStart, periodEnd, vendors, destDir, onExisting = 'skip' } = args || {};
+  const { periodStart, periodEnd, vendors, destDir, onExisting = 'skip', mailbox } = args || {};
 
   if (!periodStart || !ISO_DATE.test(periodStart)) {
     return createValidationError('periodStart', 'Required ISO date or date-time, e.g. 2026-06-01 or 2026-06-01T00:00:00Z');
@@ -100,7 +100,9 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
     const rules = loadReceiptRules();
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
-    const base = getMailboxBase();
+    // One base for the whole run: both searches and every per-message core
+    // call must address the same mailbox.
+    const base = getMailboxBase(mailbox);
 
     const manifest = [];
     const missing = [];
@@ -174,7 +176,7 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
 
       for (const message of messages) {
         try {
-          const receipt = await extractReceiptCore(graphApiClient, message.id, rules);
+          const receipt = await extractReceiptCore(graphApiClient, message.id, rules, mailbox);
 
           const template = rule.filenameTemplate || getFilenameTemplate();
           const baseName = renderFilenameTemplate(template, {
@@ -191,7 +193,8 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
               prefer: rule.prefer || 'invoice',
               destDir,
               fileName,
-              onExisting
+              onExisting,
+              mailbox
             }, rules);
             method = 'attachment';
           } else if (receipt.billingPdfUrl) {
@@ -199,7 +202,8 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
               url: receipt.billingPdfUrl,
               destDir,
               fileName,
-              onExisting
+              onExisting,
+              mailbox
             }, deps);
             method = 'link';
           } else {
@@ -207,7 +211,8 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
               messageId: message.id,
               destDir,
               fileName,
-              onExisting
+              onExisting,
+              mailbox
             }, deps);
             method = 'rendered';
           }

@@ -19,13 +19,13 @@ function throwIfMcpError(result) {
 }
 
 export async function fetchBillingPdfCore(graphApiClient, args, deps = {}) {
-  const { messageId, url, destDir, fileName, onExisting = 'skip' } = args;
+  const { messageId, url, destDir, fileName, onExisting = 'skip', mailbox } = args;
   const { fetchImpl } = deps;
 
   let sourceUrl = url;
   if (!sourceUrl) {
     const message = throwIfMcpError(await graphApiClient.makeRequest(
-      `${getMailboxBase()}/messages/${messageId}`,
+      `${getMailboxBase(mailbox)}/messages/${messageId}`,
       { select: 'id,subject,body' }
     ));
     sourceUrl = extractBillingPdfUrl(message.body?.content || '', getBillingAllowlist());
