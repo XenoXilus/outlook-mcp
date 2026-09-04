@@ -111,12 +111,19 @@ export async function listSharedMailboxesTool(authManager, args = {}) {
     }));
 
     const accessible = mailboxes.filter(entry => entry.status === 'accessible').map(entry => entry.address);
+    // The permissions hint only makes sense when something was actually
+    // probed; an all-invalid candidate list is an address problem, not an
+    // access problem, and each entry's note already says so.
+    const probed = mailboxes.some(entry => entry.status !== 'invalid');
+    const failureHint = probed
+      ? NONE_ACCESSIBLE_HINT
+      : 'No valid mailbox addresses to probe — check the addresses (expected forms like careers@yourcompany.com).';
 
     return createSafeResponse({
       mailboxes,
       accessible,
       sources,
-      hint: accessible.length > 0 ? USAGE_HINT : NONE_ACCESSIBLE_HINT,
+      hint: accessible.length > 0 ? USAGE_HINT : failureHint,
     });
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to list shared mailboxes');

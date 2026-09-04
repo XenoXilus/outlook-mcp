@@ -81,6 +81,10 @@ describe('listSharedMailboxesTool', () => {
     expect(data.mailboxes[0]).toMatchObject({ address: 'not-an-address', status: 'invalid' });
     expect(data.mailboxes[0].note).toMatch(/Invalid mailbox address/);
     expect(data.accessible).toEqual([]);
+    // An all-invalid list is an address problem: the hint must not blame
+    // permissions/Full Access.
+    expect(data.hint).toMatch(/check the addresses/i);
+    expect(data.hint).not.toMatch(/Full Access/);
   });
 
   it('gathers candidates from both env settings and deduplicates case-insensitively', async () => {
