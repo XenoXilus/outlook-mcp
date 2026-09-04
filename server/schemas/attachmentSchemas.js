@@ -16,6 +16,7 @@ export const listAttachmentsSchema = {
         type: 'string',
         description: 'The ID of the email to list attachments for',
       },
+      ...mailboxProperty,
     },
     required: ['messageId'],
   },
@@ -64,6 +65,7 @@ export const downloadAttachmentSchema = {
         description: 'What to do when the target file already exists (saveToFile mode)',
         default: 'skip',
       },
+      ...mailboxProperty,
     },
     required: ['messageId', 'attachmentId'],
   },
@@ -129,6 +131,7 @@ export const scanAttachmentsSchema = {
         description: 'How many days back to scan',
         default: 30,
       },
+      ...mailboxProperty,
     },
   },
 };

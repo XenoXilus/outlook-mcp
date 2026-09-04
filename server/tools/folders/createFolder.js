@@ -1,8 +1,9 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 // Create mail folder
 export async function createFolderTool(authManager, args) {
-  const { displayName, parentFolderId } = args;
+  const { displayName, parentFolderId, mailbox } = args;
 
   if (!displayName) {
     return createValidationError('displayName', 'Parameter is required');
@@ -11,14 +12,15 @@ export async function createFolderTool(authManager, args) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
     const folderData = {
       displayName: displayName
     };
 
-    let endpoint = '/me/mailFolders';
+    let endpoint = `${mailboxBase}/mailFolders`;
     if (parentFolderId) {
-      endpoint = `/me/mailFolders/${parentFolderId}/childFolders`;
+      endpoint = `${mailboxBase}/mailFolders/${parentFolderId}/childFolders`;
     }
 
     const result = await graphApiClient.postWithRetry(endpoint, folderData);

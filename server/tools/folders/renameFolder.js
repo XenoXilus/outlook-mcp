@@ -1,8 +1,9 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 // Rename mail folder
 export async function renameFolderTool(authManager, args) {
-  const { folderId, newDisplayName } = args;
+  const { folderId, newDisplayName, mailbox } = args;
 
   if (!folderId) {
     return createValidationError('folderId', 'Parameter is required');
@@ -15,8 +16,9 @@ export async function renameFolderTool(authManager, args) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
-    await graphApiClient.makeRequest(`/me/mailFolders/${folderId}`, {
+    await graphApiClient.makeRequest(`${mailboxBase}/mailFolders/${folderId}`, {
       body: { displayName: newDisplayName }
     }, 'PATCH');
 

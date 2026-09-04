@@ -149,6 +149,18 @@ describe('downloadAttachmentTool (file delivery)', () => {
     expect(fs.readFileSync(out.fileOutput.filePath)).toEqual(bigBytes);
   });
 
+  it('saveToFile routes through the per-call mailbox', async () => {
+    const mock = fileAttachmentMock();
+    // fileAttachmentMock pins the /me path; accept the shared path instead
+    const shared = vi.fn((p, o) => mock(p.replace('/users/careers%40example.com', '/me'), o));
+    authManager = auth(shared);
+    const res = await downloadAttachmentTool(authManager, {
+      messageId: 'm1', attachmentId: 'a1', saveToFile: true, mailbox: 'careers@example.com'
+    });
+    expect(res.isError).toBeUndefined();
+    expect(shared.mock.calls.every(c => c[0].startsWith('/users/careers%40example.com/'))).toBe(true);
+  });
+
   it('saveToFile rejects non-file attachments with a clear error', async () => {
     const mock = vi.fn(() => Promise.resolve({
       '@odata.type': '#microsoft.graph.itemAttachment',

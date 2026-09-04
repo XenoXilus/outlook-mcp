@@ -4,6 +4,7 @@
  * This module contains all JSON schemas for folder operations in the Outlook MCP server.
  * Includes folder management, statistics, and organization functionality.
  */
+import { mailboxProperty } from './sharedSchemaFragments.js';
 
 export const listFoldersSchema = {
   name: 'outlook_list_folders',
@@ -26,6 +27,7 @@ export const listFoldersSchema = {
         description: 'Maximum number of folders to return',
         default: 100,
       },
+      ...mailboxProperty,
     },
   },
 };
@@ -44,6 +46,7 @@ export const createFolderSchema = {
         type: 'string',
         description: 'ID of parent folder (optional, creates at root level if not specified)',
       },
+      ...mailboxProperty,
     },
     required: ['displayName'],
   },
@@ -63,6 +66,7 @@ export const renameFolderSchema = {
         type: 'string',
         description: 'New name for the folder',
       },
+      ...mailboxProperty,
     },
     required: ['folderId', 'newDisplayName'],
   },
@@ -83,6 +87,7 @@ export const getFolderStatsSchema = {
         description: 'Include statistics for subfolders',
         default: true,
       },
+      ...mailboxProperty,
     },
     required: ['folderId'],
   },
