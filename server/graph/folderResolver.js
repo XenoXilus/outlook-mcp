@@ -5,8 +5,9 @@ import { convertErrorToToolError, createValidationError } from '../utils/mcpErro
  * Resolves folder names to folder IDs for Microsoft Graph API calls
  */
 export class FolderResolver {
-  constructor(graphApiClient) {
+  constructor(graphApiClient, mailboxBase = '/me') {
     this.graphApiClient = graphApiClient;
+    this.mailboxBase = mailboxBase;
     this.foldersByName = new Map(); // Cache folders by display name (case insensitive)
     this.foldersById = new Map(); // Cache folders by ID
     this.foldersList = []; // Master list of all folders
@@ -19,7 +20,7 @@ export class FolderResolver {
    */
   async refreshFolderCache() {
     try {
-      const result = await this.graphApiClient.makeRequest('/me/mailFolders', {
+      const result = await this.graphApiClient.makeRequest(`${this.mailboxBase}/mailFolders`, {
         select: 'id,displayName,parentFolderId',
         top: 1000 // Get up to 1000 folders
       });
@@ -148,7 +149,7 @@ export class FolderResolver {
 
     // Otherwise make direct API call
     try {
-      const folderData = await this.graphApiClient.makeRequest(`/me/mailFolders/${folderId}`, {
+      const folderData = await this.graphApiClient.makeRequest(`${this.mailboxBase}/mailFolders/${folderId}`, {
         select: 'id,displayName,parentFolderId,totalItemCount,unreadItemCount'
       });
 
