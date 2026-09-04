@@ -148,7 +148,13 @@ export class OutlookAuthManager {
       authUrl.searchParams.append('prompt', 'select_account');
 
 
-      const server = http.createServer(async (req, res) => {
+      // The redirect arrives with the browser's whole localhost cookie jar
+      // (cookies are domain-scoped, not port-scoped), so session cookies from
+      // any local dev server ride along and routinely exceed Node's 16 KB
+      // default header budget — which rejects the callback with 431 before the
+      // handler runs. 64 KB absorbs a crowded cookie jar; the server is
+      // loopback-only and lives for a single redirect.
+      const server = http.createServer({ maxHeaderSize: 64 * 1024 }, async (req, res) => {
         const parsedUrl = url.parse(req.url, true);
 
         if (parsedUrl.pathname === '/callback') {
@@ -404,10 +410,13 @@ export class OutlookAuthManager {
         this.openBrowser(authUrl.toString());
       });
 
+      // unref: the timer must never be what keeps the process alive — the
+      // listening server holds the loop while auth is pending, and after the
+      // flow settles a referenced timer would stall CLI/test exit for 5 min.
       setTimeout(() => {
         server.close();
         reject(createAuthError('Authentication timeout - please try again', true));
-      }, 5 * 60 * 1000); // 5 minute timeout
+      }, 5 * 60 * 1000).unref(); // 5 minute timeout
     });
   }
 

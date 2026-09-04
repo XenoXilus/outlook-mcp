@@ -1,7 +1,7 @@
 {
   "dxt_version": "0.1",
   "name": "outlook-mcp",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Connects your LLM to the Outlook setup. Read and write emails, contacts, and calendar events. ",
   "author": {
     "name": "XenoXilus",
