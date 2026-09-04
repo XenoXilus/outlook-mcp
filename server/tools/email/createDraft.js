@@ -16,8 +16,11 @@ const UPLOAD_CHUNK_SIZE = 10 * 320 * 1024; // 3,276,800 bytes
  * The file is read chunk-by-chunk (never buffered whole) and PUT to the
  * pre-authenticated uploadUrl with plain fetch — no Authorization header.
  * Returns null on success, or an MCP tool-error response on failure.
+ *
+ * `mailboxBase` is required (from getMailboxBase) — no default, so an omitted
+ * argument fails loudly rather than silently targeting the signed-in user.
  */
-async function uploadLargeAttachment(graphApiClient, draftId, info, fetchImpl, mailboxBase = '/me') {
+async function uploadLargeAttachment(graphApiClient, draftId, info, fetchImpl, mailboxBase) {
   const session = await graphApiClient.postWithRetry(
     `${mailboxBase}/messages/${draftId}/attachments/createUploadSession`,
     {

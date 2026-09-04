@@ -123,6 +123,8 @@ To use this MCP server, you need to register an application in Microsoft Azure.
    - Add these permissions:
      - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Mail.Read.Shared`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared`
      - `Calendars.Read`, `Calendars.ReadWrite`
+     - `Contacts.Read`, `Contacts.ReadWrite`
+     - `Tasks.Read`, `Tasks.ReadWrite`
      - `User.Read`, `MailboxSettings.Read`
      - `Files.Read.All`, `Files.ReadWrite.All`
      - `Sites.Read.All`, `Sites.ReadWrite.All`
@@ -210,7 +212,9 @@ Receipt matching notes (v1.2):
 
 ### Shared mailboxes (v1.3)
 
-Every mail, folder, and attachment tool accepts an optional `mailbox`
+Every mail, folder, and attachment tool — and every receipt tool
+(`collect_receipts`, `extract_receipt`, `save_attachment`, `render_email_pdf`,
+`fetch_billing_pdf`) — accepts an optional `mailbox`
 argument (e.g. `careers@yourcompany.com`). Precedence: per-call `mailbox` →
 the `MCP_OUTLOOK_SHARED_MAILBOX` setting → your own mailbox. Requirements:
 
@@ -293,6 +297,8 @@ The app requests these Microsoft Graph permissions:
 - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` - Email access
 - `Mail.Read.Shared`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared` - Shared/delegated mailbox email access (v1.3)
 - `Calendars.Read`, `Calendars.ReadWrite` - Calendar access  
+- `Contacts.Read`, `Contacts.ReadWrite` - Contact access
+- `Tasks.Read`, `Tasks.ReadWrite` - Task access
 - `User.Read`, `MailboxSettings.Read` - User profile
 - `Files.Read.All`, `Files.ReadWrite.All` - OneDrive/SharePoint files
 - `Sites.Read.All`, `Sites.ReadWrite.All` - SharePoint sites

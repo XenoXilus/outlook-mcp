@@ -36,7 +36,8 @@ export const fetchBillingPdfSchema = {
       url: { type: 'string', description: 'Explicit billing-PDF URL (must be on the allowlist)' },
       destDir: { type: 'string', description: 'Destination directory (inside receipts/work dir). Defaults to MCP_OUTLOOK_RECEIPTS_DIR.' },
       fileName: { type: 'string', description: 'Target filename, e.g. "Globex 23Jun26 Invoice.pdf"' },
-      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' }
+      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' },
+      ...mailboxProperty
     },
     required: ['fileName'],
     anyOf: [{ required: ['messageId'] }, { required: ['url'] }],

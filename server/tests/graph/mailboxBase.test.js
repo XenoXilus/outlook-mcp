@@ -45,6 +45,12 @@ describe('getMailboxBase', () => {
     expect(getMailboxBase('')).toBe('/me');
   });
 
+  it('lowercases the mailbox so casing variants share one resolver cache', () => {
+    expect(getMailboxBase('Careers@Example.com')).toBe('/users/careers%40example.com');
+    process.env.MCP_OUTLOOK_SHARED_MAILBOX = 'Finance@Example.com';
+    expect(getMailboxBase()).toBe('/users/finance%40example.com');
+  });
+
   it('rejects a malformed explicit mailbox', () => {
     expect(() => getMailboxBase('not-an-address')).toThrow(/Invalid mailbox address/);
     expect(() => getMailboxBase('a b@example.com')).toThrow(/Invalid mailbox address/);

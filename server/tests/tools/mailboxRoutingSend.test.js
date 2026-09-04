@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { mockGraphClient, expectAllPathsUnder } from '../helpers/mockGraph.js';
 import { sendEmailTool } from '../../tools/email/sendEmail.js';
 import { replyToEmailTool, replyAllTool } from '../../tools/email/replyEmail.js';
@@ -36,6 +39,34 @@ describe('send-side tools route to the per-call mailbox', () => {
       expectAllPathsUnder(makeRequest, BASE, { ignore });
     });
   }
+
+  describe('createDraftTool with a direct-attach attachment', () => {
+    let tmpDir;
+    let filePath;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mailbox-routing-'));
+      filePath = path.join(tmpDir, 'cv.txt');
+      // Well under MAX_DIRECT_ATTACHMENT (3 MB), so the base64 branch is taken
+      // and no upload session is created.
+      fs.writeFileSync(filePath, 'x'.repeat(512));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it(`attaches under ${BASE}`, async () => {
+      const { authManager, makeRequest } = mockGraphClient(responder);
+      const res = await createDraftTool(authManager, {
+        to: ['p@example.com'], subject: 'Offer', body: 'Hi',
+        preserveUserStyling: false, attachmentPaths: [filePath], mailbox: M,
+      });
+      expect(res.isError).toBeUndefined();
+      expectAllPathsUnder(makeRequest, BASE);
+      expect(makeRequest.mock.calls.map(c => c[0])).toContain(`${BASE}/messages/d1/attachments`);
+    });
+  });
 
   it('surfaces a malformed mailbox as a tool error without calling Graph', async () => {
     const { authManager, makeRequest } = mockGraphClient(responder);

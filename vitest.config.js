@@ -6,6 +6,7 @@ export default defineConfig({
     environment: 'node',
     include: ['server/tests/**/*.test.js'],
     exclude: ['server/tests/**/*.benchmark.js'],
+    setupFiles: ['server/tests/helpers/env.js'],
     testTimeout: 30000,
     hookTimeout: 30000,
     teardownTimeout: 30000,
