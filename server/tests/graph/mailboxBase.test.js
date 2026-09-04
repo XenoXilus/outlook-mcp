@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { getMailboxBase } from '../../graph/graphHelpers.js';
 import { searchEmailsTool } from '../../tools/email/searchEmails.js';
+import { mockGraphClient } from '../helpers/mockGraph.js';
 
 describe('getMailboxBase', () => {
   let saved;
@@ -48,5 +49,26 @@ describe('getMailboxBase', () => {
     expect(() => getMailboxBase('not-an-address')).toThrow(/Invalid mailbox address/);
     expect(() => getMailboxBase('a b@example.com')).toThrow(/Invalid mailbox address/);
     expect(() => getMailboxBase('x@ex/ample.com')).toThrow(/Invalid mailbox address/);
+  });
+
+  it('searchEmailsTool honours a per-call mailbox over the env setting', async () => {
+    process.env.MCP_OUTLOOK_SHARED_MAILBOX = 'finance@example.com';
+    const { authManager, makeRequest } = mockGraphClient();
+    await searchEmailsTool(authManager, { from: 'a@b.example', mailbox: 'careers@example.com' });
+    expect(makeRequest.mock.calls[0][0]).toBe('/users/careers%40example.com/messages');
+  });
+
+  it('searchEmailsTool resolves folders in the target mailbox', async () => {
+    const { authManager, client } = mockGraphClient();
+    await searchEmailsTool(authManager, { subject: 'CV', folders: ['Applications'], mailbox: 'careers@example.com' });
+    expect(client.getFolderResolver).toHaveBeenCalledWith('/users/careers%40example.com');
+  });
+
+  it('searchEmailsTool returns isError for a malformed mailbox', async () => {
+    const { authManager, makeRequest } = mockGraphClient();
+    const res = await searchEmailsTool(authManager, { subject: 'x', mailbox: 'nonsense' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/Invalid mailbox address/);
+    expect(makeRequest).not.toHaveBeenCalled();
   });
 });

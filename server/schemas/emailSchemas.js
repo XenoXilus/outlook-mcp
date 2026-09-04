@@ -4,6 +4,7 @@
  * This module contains all JSON schemas for email operations in the Outlook MCP server.
  * Schemas are organized by functionality and include comprehensive validation rules.
  */
+import { mailboxProperty } from './sharedSchemaFragments.js';
 
 export const listEmailsSchema = {
   name: 'outlook_list_emails',
@@ -167,6 +168,7 @@ export const searchEmailsSchema = {
         description: 'Sort order (e.g., "receivedDateTime desc")',
         default: 'receivedDateTime desc',
       },
+      ...mailboxProperty,
     },
   },
 };
