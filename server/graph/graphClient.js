@@ -28,7 +28,7 @@ export class GraphApiClient {
     this.requestWindow = [];
     this.maxConcurrentRequests = 4; // Per mailbox limit from Graph API
     this.activeRequests = 0;
-    this.folderResolver = null; // Will be initialized when needed
+    this.folderResolvers = new Map(); // FolderResolver per mailbox base
     
     // Rate limiting and monitoring metrics
     this.rateLimitMetrics = {
@@ -443,12 +443,12 @@ export class GraphApiClient {
     return [401, 429, 500, 502, 503, 504].includes(statusCode);
   }
 
-  // Get FolderResolver instance (lazy initialization)
-  getFolderResolver() {
-    if (!this.folderResolver) {
-      this.folderResolver = new FolderResolver(this);
+  // Get FolderResolver for a mailbox base (lazy, cached per base)
+  getFolderResolver(mailboxBase = '/me') {
+    if (!this.folderResolvers.has(mailboxBase)) {
+      this.folderResolvers.set(mailboxBase, new FolderResolver(this, mailboxBase));
     }
-    return this.folderResolver;
+    return this.folderResolvers.get(mailboxBase);
   }
 
   // Utility methods for common operations

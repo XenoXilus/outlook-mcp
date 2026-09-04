@@ -2,14 +2,16 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
 import { createSafeResponse, safeStringify } from '../../utils/jsonUtils.js';
 import { stripHtml, truncateText } from '../../utils/textUtils.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 export async function listEmailsTool(authManager, args) {
-  const { folder = 'inbox', limit = 10, filter } = args;
+  const { folder = 'inbox', limit = 10, filter, mailbox } = args;
 
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
-    const folderResolver = graphApiClient.getFolderResolver();
+    const mailboxBase = getMailboxBase(mailbox);
+    const folderResolver = graphApiClient.getFolderResolver(mailboxBase);
 
     // Resolve folder name to ID
     let folderId;
@@ -29,7 +31,7 @@ export async function listEmailsTool(authManager, args) {
       options.filter = filter;
     }
 
-    const result = await graphApiClient.makeRequest(`/me/mailFolders/${folderId}/messages`, options);
+    const result = await graphApiClient.makeRequest(`${mailboxBase}/mailFolders/${folderId}/messages`, options);
 
     // Handle MCP error responses from makeRequest
     if (result.content && result.isError !== undefined) {
@@ -73,7 +75,8 @@ export async function getEmailTool(authManager, args) {
     messageId,
     truncate = true,
     maxLength = 1000,
-    format = 'text'
+    format = 'text',
+    mailbox
   } = args;
 
   if (!messageId) {
@@ -85,13 +88,14 @@ export async function getEmailTool(authManager, args) {
     console.error(`DEBUG getEmailTool: Starting authentication for messageId: ${messageId}`);
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
     const options = {
       select: 'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,body,bodyPreview,importance,isRead,hasAttachments,attachments,conversationId'
     };
 
     console.error(`DEBUG getEmailTool: Making Graph API request for ${messageId}`);
-    const email = await graphApiClient.makeRequest(`/me/messages/${messageId}`, options);
+    const email = await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}`, options);
     console.error(`DEBUG getEmailTool: Got email response with subject: ${email?.subject || 'NO SUBJECT'}`);
 
     // Check if the response is already an MCP error

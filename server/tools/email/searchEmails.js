@@ -17,7 +17,8 @@ export async function searchEmailsTool(authManager, args) {
     truncate = true,
     maxLength = 1000,
     format = 'text',
-    orderBy = 'receivedDateTime desc'
+    orderBy = 'receivedDateTime desc',
+    mailbox
   } = args;
 
   // Cap limit at 5 when includeBody is true to prevent context overflow
@@ -27,7 +28,7 @@ export async function searchEmailsTool(authManager, args) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
-    const mailboxBase = getMailboxBase();
+    const mailboxBase = getMailboxBase(mailbox);
 
     const options = {
       top: Math.min(effectiveLimit, 1000) // Cap at 1000 for performance
@@ -45,7 +46,7 @@ export async function searchEmailsTool(authManager, args) {
     let resolvedFolderIds = [];
     if (folders.length > 0) {
       try {
-        const folderResolver = graphApiClient.getFolderResolver();
+        const folderResolver = graphApiClient.getFolderResolver(mailboxBase);
         resolvedFolderIds = await folderResolver.resolveFoldersToIds(folders);
       } catch (folderError) {
         return createValidationError('folders', folderError.message);

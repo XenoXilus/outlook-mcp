@@ -18,11 +18,11 @@ function throwIfMcpError(result) {
 }
 
 export async function renderEmailPdfCore(graphApiClient, args, deps = {}) {
-  const { messageId, destDir, fileName, onExisting = 'skip' } = args;
+  const { messageId, destDir, fileName, onExisting = 'skip', mailbox } = args;
   const { renderImpl } = deps;
 
   const message = throwIfMcpError(await graphApiClient.makeRequest(
-    `${getMailboxBase()}/messages/${messageId}`,
+    `${getMailboxBase(mailbox)}/messages/${messageId}`,
     { select: 'id,subject,from,receivedDateTime,body' }
   ));
 

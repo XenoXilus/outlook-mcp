@@ -1,5 +1,6 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
 import { createSafeResponse } from '../../utils/jsonUtils.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 // Helper function to format file size
 function formatFileSize(bytes) {
@@ -17,12 +18,14 @@ export async function scanAttachmentsTool(authManager, args) {
     maxSizeMB = 10, 
     suspiciousTypes = ['exe', 'bat', 'cmd', 'scr', 'vbs', 'js'],
     limit = 100,
-    daysBack = 30
+    daysBack = 30,
+    mailbox
   } = args;
 
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
     // Calculate date filter
     const sinceDate = new Date();
@@ -35,7 +38,7 @@ export async function scanAttachmentsTool(authManager, args) {
       orderby: 'receivedDateTime desc'
     };
 
-    const emailsResult = await graphApiClient.makeRequest(`/me/mailFolders/${folder}/messages`, options);
+    const emailsResult = await graphApiClient.makeRequest(`${mailboxBase}/mailFolders/${folder}/messages`, options);
 
     const suspiciousEmails = [];
     const largeAttachments = [];
@@ -53,7 +56,7 @@ export async function scanAttachmentsTool(authManager, args) {
     // Process each email with attachments
     for (const email of emailsResult.value || []) {
       try {
-        const attachmentsResult = await graphApiClient.makeRequest(`/me/messages/${email.id}/attachments`, {
+        const attachmentsResult = await graphApiClient.makeRequest(`${mailboxBase}/messages/${email.id}/attachments`, {
           select: 'id,name,contentType,size,isInline'
         });
 

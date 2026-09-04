@@ -1,5 +1,6 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
 import { createSafeResponse } from '../../utils/jsonUtils.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 // Helper function to format file size
 function formatFileSize(bytes) {
@@ -12,7 +13,7 @@ function formatFileSize(bytes) {
 
 // List attachments for a message
 export async function listAttachmentsTool(authManager, args) {
-  const { messageId } = args;
+  const { messageId, mailbox } = args;
 
   if (!messageId) {
     return createValidationError('messageId', 'Parameter is required');
@@ -21,8 +22,9 @@ export async function listAttachmentsTool(authManager, args) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
-    const result = await graphApiClient.makeRequest(`/me/messages/${messageId}/attachments`, {
+    const result = await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}/attachments`, {
       select: 'id,name,contentType,size,isInline,lastModifiedDateTime'
     });
 

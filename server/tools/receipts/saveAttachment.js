@@ -29,10 +29,11 @@ export async function saveAttachmentCore(graphApiClient, args, rules = loadRecei
     fileName,
     filenameTemplate,
     vendor,
-    onExisting = 'skip'
+    onExisting = 'skip',
+    mailbox
   } = args;
 
-  const base = getMailboxBase();
+  const base = getMailboxBase(mailbox);
   let targetId = attachmentId;
 
   if (!targetId) {

@@ -2,6 +2,8 @@
  * Receipt/invoice-run MCP tool schemas (spec: Autonomous Invoice Submission).
  */
 
+import { mailboxProperty } from './sharedSchemaFragments.js';
+
 export const saveAttachmentSchema = {
   name: 'outlook_save_attachment',
   description: 'Save an email attachment\'s original bytes to a file (no parsing/transformation). Defaults to the Invoice-*.pdf when multiple PDFs are attached. Writes only under the configured receipts/work directory.',
@@ -17,7 +19,8 @@ export const saveAttachmentSchema = {
       fileName: { type: 'string', description: 'Explicit target filename, e.g. "Acme 29Jun26 Invoice.pdf". Takes priority over filenameTemplate. Defaults to the attachment\'s own name when neither fileName nor filenameTemplate/vendor is supplied.' },
       filenameTemplate: { type: 'string', description: 'Template for the saved filename, e.g. "{vendor} {DDMmmYY} Invoice.pdf". Overrides RECEIPT_FILENAME_TEMPLATE. Requires vendor to be supplied or auto-detectable from the message sender.' },
       vendor: { type: 'string', description: 'Vendor label used in filenameTemplate, e.g. "Acme". When omitted, the vendor is auto-detected from the message sender.' },
-      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' }
+      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' },
+      ...mailboxProperty
     },
     required: ['messageId'],
   },
@@ -33,7 +36,8 @@ export const fetchBillingPdfSchema = {
       url: { type: 'string', description: 'Explicit billing-PDF URL (must be on the allowlist)' },
       destDir: { type: 'string', description: 'Destination directory (inside receipts/work dir). Defaults to MCP_OUTLOOK_RECEIPTS_DIR.' },
       fileName: { type: 'string', description: 'Target filename, e.g. "Globex 23Jun26 Invoice.pdf"' },
-      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' }
+      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' },
+      ...mailboxProperty
     },
     required: ['fileName'],
     anyOf: [{ required: ['messageId'] }, { required: ['url'] }],
@@ -46,7 +50,8 @@ export const extractReceiptSchema = {
   inputSchema: {
     type: 'object',
     properties: {
-      messageId: { type: 'string', description: 'The ID of the receipt email' }
+      messageId: { type: 'string', description: 'The ID of the receipt email' },
+      ...mailboxProperty
     },
     required: ['messageId'],
   },
@@ -61,7 +66,8 @@ export const renderEmailPdfSchema = {
       messageId: { type: 'string', description: 'The ID of the email to render' },
       destDir: { type: 'string', description: 'Destination directory (inside receipts/work dir). Defaults to MCP_OUTLOOK_RECEIPTS_DIR.' },
       fileName: { type: 'string', description: 'Target filename, e.g. "Hooli 09Jun26 Invoice.pdf"' },
-      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' }
+      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' },
+      ...mailboxProperty
     },
     required: ['messageId', 'fileName'],
   },
@@ -92,7 +98,8 @@ export const collectReceiptsSchema = {
         }
       },
       destDir: { type: 'string', description: 'Destination directory (inside receipts/work dir). Defaults to MCP_OUTLOOK_RECEIPTS_DIR.' },
-      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' }
+      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' },
+      ...mailboxProperty
     },
     required: ['periodStart', 'periodEnd', 'vendors'],
   },

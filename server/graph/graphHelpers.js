@@ -598,13 +598,27 @@ export const graphHelpers = {
     },
   },
 };
+const MAILBOX_ADDRESS = /^[^\s/\\@]+@[^\s/\\@]+\.[^\s/\\@]+$/;
+
 /**
- * Mailbox base path for Graph mail requests (FR-5).
- * Set MCP_OUTLOOK_SHARED_MAILBOX to read a delegated/shared mailbox;
- * defaults to the authenticated user's own mailbox.
+ * Mailbox base path for Graph mail requests.
+ * Precedence: explicit per-call `mailbox` argument, then the
+ * MCP_OUTLOOK_SHARED_MAILBOX setting, then the signed-in user (/me).
+ * Shared-mailbox access additionally requires the Mail.*.Shared delegated
+ * scopes and Full Access delegation on the target mailbox.
+ *
+ * Addresses are lowercased so that `Careers@X` and `careers@x` produce one
+ * base path — and therefore share a single folder-resolver cache entry.
  */
-export function getMailboxBase() {
-  const shared = (process.env.MCP_OUTLOOK_SHARED_MAILBOX || '').trim();
+export function getMailboxBase(mailbox) {
+  const explicit = (mailbox || '').trim().toLowerCase();
+  if (explicit) {
+    if (!MAILBOX_ADDRESS.test(explicit)) {
+      throw new Error(`Invalid mailbox address: ${JSON.stringify(explicit)} (expected an address like careers@example.com)`);
+    }
+    return `/users/${encodeURIComponent(explicit)}`;
+  }
+  const shared = (process.env.MCP_OUTLOOK_SHARED_MAILBOX || '').trim().toLowerCase();
   return shared ? `/users/${encodeURIComponent(shared)}` : '/me';
 }
 

@@ -121,8 +121,10 @@ To use this MCP server, you need to register an application in Microsoft Azure.
 6. Go to **API permissions** in the sidebar.
    - Click **Add a permission** -> **Microsoft Graph** -> **Delegated permissions**.
    - Add these permissions:
-     - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`
+     - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Mail.Read.Shared`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared`
      - `Calendars.Read`, `Calendars.ReadWrite`
+     - `Contacts.Read`, `Contacts.ReadWrite`
+     - `Tasks.Read`, `Tasks.ReadWrite`
      - `User.Read`, `MailboxSettings.Read`
      - `Files.Read.All`, `Files.ReadWrite.All`
      - `Sites.Read.All`, `Sites.ReadWrite.All`
@@ -153,7 +155,7 @@ Personal Microsoft accounts can also register apps in Azure:
 | `AZURE_TENANT_ID` | Yes | Your Azure AD directory (tenant) ID |
 | `MCP_OUTLOOK_WORK_DIR` | No | Directory for saving large files (defaults to system temp) |
 | `MCP_OUTLOOK_ALLOWED_WRITE_DIRS` | No | Comma-separated extra directories save tools may write into when given an explicit `destDir`. Permission only — defaults are unchanged |
-| `MCP_OUTLOOK_SHARED_MAILBOX` | No | Delegated/shared mailbox to read; empty = own mailbox |
+| `MCP_OUTLOOK_SHARED_MAILBOX` | No | Default mailbox for the per-call 'mailbox' argument; empty = own mailbox. |
 
 The desktop extension (DXT) exposes only the mail settings above. The receipt/invoice-run behaviour below is configured **by the calling process** (e.g. a scheduled routine's MCP server config) via environment variables — it is intentionally not part of the extension settings UI:
 
@@ -207,6 +209,25 @@ Receipt matching notes (v1.2):
 - `outlook_download_attachment` accepts `saveToFile`/`destDir`/`fileName`/`onExisting`
   to write raw bytes server-side and return only `{savedPath, size, sha256}` —
   use this for real invoice PDFs instead of inline base64.
+
+### Shared mailboxes (v1.3)
+
+Every mail, folder, and attachment tool — and every receipt tool
+(`collect_receipts`, `extract_receipt`, `save_attachment`, `render_email_pdf`,
+`fetch_billing_pdf`) — accepts an optional `mailbox`
+argument (e.g. `careers@yourcompany.com`). Precedence: per-call `mailbox` →
+the `MCP_OUTLOOK_SHARED_MAILBOX` setting → your own mailbox. Requirements:
+
+- Exchange **Full Access** delegation to the shared mailbox for the signed-in
+  user (Send As or Send on Behalf additionally governs how sends appear).
+  One styling note: signatures and font styling are always the signed-in
+  user's own — a send from a shared mailbox carries your personal signature,
+  so consider `preserveUserStyling: false` for shared sends.
+- The `Mail.*.Shared` delegated scopes — added in v1.3, so **each user must
+  re-consent once**: the interactive flow prompts automatically on next
+  sign-in; headless setups re-run `npm run auth:bootstrap` once.
+
+Calendar tools stay on your own calendar in this release.
 
 ### Headless (Scheduled) Runs
 
@@ -274,7 +295,10 @@ The server uses OAuth 2.0 with PKCE for secure authentication:
 The app requests these Microsoft Graph permissions:
 
 - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` - Email access
+- `Mail.Read.Shared`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared` - Shared/delegated mailbox email access (v1.3)
 - `Calendars.Read`, `Calendars.ReadWrite` - Calendar access  
+- `Contacts.Read`, `Contacts.ReadWrite` - Contact access
+- `Tasks.Read`, `Tasks.ReadWrite` - Task access
 - `User.Read`, `MailboxSettings.Read` - User profile
 - `Files.Read.All`, `Files.ReadWrite.All` - OneDrive/SharePoint files
 - `Sites.Read.All`, `Sites.ReadWrite.All` - SharePoint sites

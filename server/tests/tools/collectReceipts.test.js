@@ -459,4 +459,23 @@ describe('collectReceiptsTool (FR-6)', () => {
     expect(failed.error).toContain('Graph exploded');
     expect(out.missing).toEqual(['Vandelay']);
   });
+
+  it('routes the whole collection run through a per-call mailbox', async () => {
+    makeRequest
+      .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })
+      .mockResolvedValueOnce(STRIPE_FULL('m1', '2026-06-29T07:12:00Z'))
+      .mockResolvedValueOnce(ATTACHMENT_LIST)
+      .mockResolvedValueOnce(ATTACHMENT_LIST)
+      .mockResolvedValueOnce(ATTACHMENT_FULL);
+
+    const res = await collectReceiptsTool(authManager, {
+      periodStart: '2026-06-01T00:00:00Z', periodEnd: '2026-06-30T23:59:59Z',
+      mailbox: 'finance-shared@example.com',
+      vendors: [{ vendor: 'Acme', from: 'invoice+statements@mail.acme.com' }]
+    });
+    expect(JSON.parse(res.content[0].text).manifest[0].status).toBe('saved');
+    for (const call of makeRequest.mock.calls) {
+      expect(call[0].startsWith('/users/finance-shared%40example.com/')).toBe(true);
+    }
+  });
 });

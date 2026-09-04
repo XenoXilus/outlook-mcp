@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { OutlookAuthManager } from '../../auth/auth.js';
+import { authConfig } from '../../auth/config.js';
 
 describe('headless auth mode (NFR-1)', () => {
   let manager, savedMode;
@@ -63,5 +64,11 @@ describe('headless auth mode (NFR-1)', () => {
 
     await manager.authenticate();
     expect(manager.authenticateInteractive).toHaveBeenCalled();
+  });
+
+  it('requests the delegated .Shared mail scopes needed for shared mailboxes', () => {
+    for (const scope of ['Mail.Read.Shared', 'Mail.ReadWrite.Shared', 'Mail.Send.Shared']) {
+      expect(authConfig.oauth.scope.split(' ')).toContain(scope);
+    }
   });
 });

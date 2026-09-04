@@ -18,8 +18,8 @@ function throwIfMcpError(result) {
   return result;
 }
 
-export async function extractReceiptCore(graphApiClient, messageId, rules = loadReceiptRules()) {
-  const base = getMailboxBase();
+export async function extractReceiptCore(graphApiClient, messageId, rules = loadReceiptRules(), mailbox) {
+  const base = getMailboxBase(mailbox);
   const message = throwIfMcpError(await graphApiClient.makeRequest(
     `${base}/messages/${messageId}`,
     { select: 'id,subject,from,receivedDateTime,body,hasAttachments' }
@@ -44,7 +44,7 @@ export async function extractReceiptTool(authManager, args) {
     const rules = loadReceiptRules();
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
-    const result = await extractReceiptCore(graphApiClient, args.messageId, rules);
+    const result = await extractReceiptCore(graphApiClient, args.messageId, rules, args.mailbox);
     return createSafeResponse(result);
   } catch (error) {
     return convertErrorToToolError(error, 'Failed to extract receipt');
