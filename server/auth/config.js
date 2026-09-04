@@ -8,6 +8,9 @@ export const authConfig = {
       'Mail.Read',
       'Mail.ReadWrite',
       'Mail.Send',
+      'Mail.Read.Shared',      // read mail in delegated/shared mailboxes
+      'Mail.ReadWrite.Shared', // write (move, flag, draft) in delegated/shared mailboxes
+      'Mail.Send.Shared',      // send as / on behalf of delegated/shared mailboxes
       'Calendars.Read',
       'Calendars.ReadWrite',
       'Contacts.Read',
