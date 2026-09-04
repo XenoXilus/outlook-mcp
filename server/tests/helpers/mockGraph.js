@@ -26,10 +26,16 @@ export function mockGraphClient(responder = () => ({ value: [] })) {
   return { authManager, client, makeRequest };
 }
 
-/** Assert every Graph call in `makeRequest` targeted the given base path. */
-export function expectAllPathsUnder(makeRequest, base) {
-  expect(makeRequest.mock.calls.length).toBeGreaterThan(0);
-  for (const call of makeRequest.mock.calls) {
+/**
+ * Assert every Graph call in `makeRequest` targeted the given base path.
+ * `ignore` lists exact paths to exclude — for reads that are deliberately
+ * scoped to the signed-in user (personal mail settings, signature/styling)
+ * and therefore never routed to a shared mailbox.
+ */
+export function expectAllPathsUnder(makeRequest, base, { ignore = [] } = {}) {
+  const calls = makeRequest.mock.calls.filter((call) => !ignore.includes(call[0]));
+  expect(calls.length).toBeGreaterThan(0);
+  for (const call of calls) {
     expect(call[0].startsWith(base + '/')).toBe(true);
   }
 }

@@ -4,6 +4,7 @@
  * This module contains all JSON schemas for attachment operations in the Outlook MCP server.
  * Includes attachment management, download, scanning, and security functionality.
  */
+import { mailboxProperty } from './sharedSchemaFragments.js';
 
 export const listAttachmentsSchema = {
   name: 'outlook_list_attachments',
@@ -90,6 +91,7 @@ export const addAttachmentSchema = {
         type: 'string',
         description: 'Base64-encoded content of the attachment',
       },
+      ...mailboxProperty,
     },
     required: ['messageId', 'name', 'contentType', 'contentBytes'],
   },

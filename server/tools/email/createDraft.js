@@ -3,6 +3,7 @@ import path from 'path';
 import { applyUserStyling } from '../common/sharedUtils.js';
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
 import { createSafeResponse } from '../../utils/jsonUtils.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 const MAX_DIRECT_ATTACHMENT = 3 * 1024 * 1024; // Graph's base64 direct-attach ceiling
 const MAX_ATTACHMENT = 150 * 1024 * 1024; // Graph's per-attachment ceiling
@@ -16,9 +17,9 @@ const UPLOAD_CHUNK_SIZE = 10 * 320 * 1024; // 3,276,800 bytes
  * pre-authenticated uploadUrl with plain fetch — no Authorization header.
  * Returns null on success, or an MCP tool-error response on failure.
  */
-async function uploadLargeAttachment(graphApiClient, draftId, info, fetchImpl) {
+async function uploadLargeAttachment(graphApiClient, draftId, info, fetchImpl, mailboxBase = '/me') {
   const session = await graphApiClient.postWithRetry(
-    `/me/messages/${draftId}/attachments/createUploadSession`,
+    `${mailboxBase}/messages/${draftId}/attachments/createUploadSession`,
     {
       AttachmentItem: {
         attachmentType: 'file',
@@ -97,7 +98,7 @@ export async function createDraftTool(authManager, args, deps = {}) {
   const { fetchImpl = fetch } = deps;
   const {
     to, subject, body, bodyHtml, bodyType = 'text', cc = [], bcc = [],
-    importance = 'normal', preserveUserStyling = true, attachmentPaths = [],
+    importance = 'normal', preserveUserStyling = true, attachmentPaths = [], mailbox,
   } = args;
 
   if (!to || to.length === 0) {
@@ -126,6 +127,7 @@ export async function createDraftTool(authManager, args, deps = {}) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
     // Validate every attachment (existence + size) BEFORE creating the draft or
     // making any attachment call, so an unreadable/oversized file aborts cleanly.
@@ -180,7 +182,7 @@ export async function createDraftTool(authManager, args, deps = {}) {
       }));
     }
 
-    const result = await graphApiClient.postWithRetry('/me/messages', draft);
+    const result = await graphApiClient.postWithRetry(`${mailboxBase}/messages`, draft);
     if (result && result.isError !== undefined && result.content) return result;
 
     const attached = [];
@@ -188,7 +190,7 @@ export async function createDraftTool(authManager, args, deps = {}) {
       if (info.size <= MAX_DIRECT_ATTACHMENT) {
         // Small file: base64 direct-attach.
         const buffer = await fs.promises.readFile(info.filePath);
-        const attachResult = await graphApiClient.postWithRetry(`/me/messages/${result.id}/attachments`, {
+        const attachResult = await graphApiClient.postWithRetry(`${mailboxBase}/messages/${result.id}/attachments`, {
           '@odata.type': '#microsoft.graph.fileAttachment',
           name: info.name,
           contentBytes: buffer.toString('base64'),
@@ -196,13 +198,13 @@ export async function createDraftTool(authManager, args, deps = {}) {
         if (attachResult && attachResult.isError !== undefined && attachResult.content) return attachResult;
       } else {
         // Large file: chunked upload session (never send).
-        const uploadError = await uploadLargeAttachment(graphApiClient, result.id, info, fetchImpl);
+        const uploadError = await uploadLargeAttachment(graphApiClient, result.id, info, fetchImpl, mailboxBase);
         if (uploadError) return uploadError;
       }
       attached.push({ name: info.name, size: info.size });
     }
 
-    const draftInfo = await graphApiClient.makeRequest(`/me/messages/${result.id}`, { select: 'id,webLink' });
+    const draftInfo = await graphApiClient.makeRequest(`${mailboxBase}/messages/${result.id}`, { select: 'id,webLink' });
 
     return createSafeResponse({
       draftId: result.id,

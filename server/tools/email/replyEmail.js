@@ -1,9 +1,10 @@
 import { applyUserStyling } from '../common/sharedUtils.js';
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 // Reply to an email
 export async function replyToEmailTool(authManager, args) {
-  const { messageId, body, bodyType = 'text', comment = '', preserveUserStyling = true } = args;
+  const { messageId, body, bodyType = 'text', comment = '', preserveUserStyling = true, mailbox } = args;
 
   if (!messageId) {
     return createValidationError('messageId', 'Parameter is required');
@@ -16,6 +17,7 @@ export async function replyToEmailTool(authManager, args) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
     const replyPayload = {};
 
@@ -40,7 +42,7 @@ export async function replyToEmailTool(authManager, args) {
       }
     }
 
-    const result = await graphApiClient.postWithRetry(`/me/messages/${messageId}/reply`, replyPayload);
+    const result = await graphApiClient.postWithRetry(`${mailboxBase}/messages/${messageId}/reply`, replyPayload);
 
     return {
       content: [
@@ -57,7 +59,7 @@ export async function replyToEmailTool(authManager, args) {
 
 // Reply all to an email
 export async function replyAllTool(authManager, args) {
-  const { messageId, body, bodyType = 'text', comment = '', preserveUserStyling = true } = args;
+  const { messageId, body, bodyType = 'text', comment = '', preserveUserStyling = true, mailbox } = args;
 
   if (!messageId) {
     return createValidationError('messageId', 'Parameter is required');
@@ -70,6 +72,7 @@ export async function replyAllTool(authManager, args) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
     const replyPayload = {};
 
@@ -94,7 +97,7 @@ export async function replyAllTool(authManager, args) {
       }
     }
 
-    const result = await graphApiClient.postWithRetry(`/me/messages/${messageId}/replyAll`, replyPayload);
+    const result = await graphApiClient.postWithRetry(`${mailboxBase}/messages/${messageId}/replyAll`, replyPayload);
 
     return {
       content: [

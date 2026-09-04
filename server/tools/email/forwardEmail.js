@@ -1,9 +1,10 @@
 import { applyUserStyling } from '../common/sharedUtils.js';
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 // Forward an email
 export async function forwardEmailTool(authManager, args) {
-  const { messageId, to, body = '', bodyType = 'text', comment = '', preserveUserStyling = true } = args;
+  const { messageId, to, body = '', bodyType = 'text', comment = '', preserveUserStyling = true, mailbox } = args;
 
   if (!messageId) {
     return createValidationError('messageId', 'Parameter is required');
@@ -16,6 +17,7 @@ export async function forwardEmailTool(authManager, args) {
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
     const forwardPayload = {
       toRecipients: to.map(email => ({
@@ -37,7 +39,7 @@ export async function forwardEmailTool(authManager, args) {
       }
     }
 
-    const result = await graphApiClient.postWithRetry(`/me/messages/${messageId}/forward`, forwardPayload);
+    const result = await graphApiClient.postWithRetry(`${mailboxBase}/messages/${messageId}/forward`, forwardPayload);
 
     return {
       content: [

@@ -1,13 +1,15 @@
 import { applyUserStyling, clearStylingCache } from '../common/sharedUtils.js';
 import { convertErrorToToolError } from '../../utils/mcpErrorResponse.js';
+import { getMailboxBase } from '../../graph/graphHelpers.js';
 
 // Send email with user styling
 export async function sendEmailTool(authManager, args) {
-  const { to, subject, body, bodyType = 'text', cc = [], bcc = [], preserveUserStyling = true } = args;
+  const { to, subject, body, bodyType = 'text', cc = [], bcc = [], preserveUserStyling = true, mailbox } = args;
 
   try {
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
+    const mailboxBase = getMailboxBase(mailbox);
 
     let finalBody = body;
     let finalBodyType = bodyType;
@@ -42,13 +44,16 @@ export async function sendEmailTool(authManager, args) {
       }));
     }
 
-    await graphApiClient.postWithRetry('/me/sendMail', {
+    await graphApiClient.postWithRetry(`${mailboxBase}/sendMail`, {
       message,
       saveToSentItems: true,
     });
 
     // Invalidate styling cache after sending email (user might have changed styling)
-    // Don't invalidate signature cache as frequently since signatures change less often
+    // Don't invalidate signature cache as frequently since signatures change less often.
+    // The styling cache is keyed on the SIGNED-IN user, whose own mail settings and
+    // signature supplied the styling, so this read stays on /me even when the message
+    // was sent from a shared mailbox.
     try {
       const userInfo = await graphApiClient.makeRequest('/me', { select: 'id' });
       clearStylingCache(userInfo.id);
