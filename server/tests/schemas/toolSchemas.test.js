@@ -290,11 +290,15 @@ describe('Tool Schemas', () => {
     // are excluded. Every other category is mailbox-aware and must advertise it.
     const MAILBOX_AWARE_CATEGORIES = ['email', 'folder', 'attachment', 'receipts'];
 
+    // Discovery tools enumerate mailboxes instead of operating inside one, so they take no `mailbox`.
+    const MAILBOX_ENUMERATION_TOOLS = new Set(['outlook_list_shared_mailboxes']);
+
     it.each(MAILBOX_AWARE_CATEGORIES)('every %s schema declares a mailbox property', (category) => {
       const schemas = getSchemasByCategory(category);
       expect(schemas.length).toBeGreaterThan(0);
 
       const missing = schemas
+        .filter(schema => !MAILBOX_ENUMERATION_TOOLS.has(schema.name))
         .filter(schema => !schema.inputSchema?.properties?.mailbox)
         .map(schema => schema.name);
       expect(missing, `${category} schemas missing a mailbox property — add ...mailboxProperty`).toEqual([]);

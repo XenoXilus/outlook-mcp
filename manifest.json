@@ -40,6 +40,13 @@
       "description": "Default mailbox for the per-call 'mailbox' argument; empty = own mailbox.",
       "required": false,
       "default": ""
+    },
+    "known_mailboxes": {
+      "type": "string",
+      "title": "Known Shared Mailboxes",
+      "description": "Comma-separated shared mailboxes your team uses (e.g. careers@yourcompany.com, info@yourcompany.com). Used by outlook_list_shared_mailboxes for discovery.",
+      "required": false,
+      "default": ""
     }
   },
   "server": {
@@ -55,7 +62,8 @@
         "AZURE_TENANT_ID": "${user_config.azure_tenant_id}",
         "MCP_OUTLOOK_WORK_DIR": "${user_config.download_directory}",
         "MCP_OUTLOOK_ALLOWED_WRITE_DIRS": "${user_config.allowed_write_directories}",
-        "MCP_OUTLOOK_SHARED_MAILBOX": "${user_config.shared_mailbox}"
+        "MCP_OUTLOOK_SHARED_MAILBOX": "${user_config.shared_mailbox}",
+        "MCP_OUTLOOK_KNOWN_MAILBOXES": "${user_config.known_mailboxes}"
       }
     }
   },

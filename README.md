@@ -156,6 +156,7 @@ Personal Microsoft accounts can also register apps in Azure:
 | `MCP_OUTLOOK_WORK_DIR` | No | Directory for saving large files (defaults to system temp) |
 | `MCP_OUTLOOK_ALLOWED_WRITE_DIRS` | No | Comma-separated extra directories save tools may write into when given an explicit `destDir`. Permission only — defaults are unchanged |
 | `MCP_OUTLOOK_SHARED_MAILBOX` | No | Default mailbox for the per-call 'mailbox' argument; empty = own mailbox. |
+| `MCP_OUTLOOK_KNOWN_MAILBOXES` | No | Comma-separated shared mailboxes offered by `outlook_list_shared_mailboxes` discovery |
 
 The desktop extension (DXT) exposes only the mail settings above. The receipt/invoice-run behaviour below is configured **by the calling process** (e.g. a scheduled routine's MCP server config) via environment variables — it is intentionally not part of the extension settings UI:
 
@@ -226,6 +227,14 @@ the `MCP_OUTLOOK_SHARED_MAILBOX` setting → your own mailbox. Requirements:
 - The `Mail.*.Shared` delegated scopes — added in v1.3, so **each user must
   re-consent once**: the interactive flow prompts automatically on next
   sign-in; headless setups re-run `npm run auth:bootstrap` once.
+
+Graph offers no delegated API that lists the mailboxes you hold Full Access to,
+so discovery is candidate-based: `outlook_list_shared_mailboxes` probes the
+addresses in the **Known Shared Mailboxes** setting
+(`MCP_OUTLOOK_KNOWN_MAILBOXES`), the Shared Mailbox setting, and any
+`candidates` you pass, then reports which ones actually open (with inbox
+counts) and which are denied, missing, or malformed. Feed an accessible
+address straight back as the `mailbox` argument.
 
 Calendar tools stay on your own calendar in this release.
 

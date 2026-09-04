@@ -17,6 +17,7 @@ export { searchEmailsTool } from './email/searchEmails.js';
 export { createDraftTool } from './email/createDraft.js';
 export { replyToEmailTool, replyAllTool } from './email/replyEmail.js';
 export { forwardEmailTool } from './email/forwardEmail.js';
+export { listSharedMailboxesTool } from './email/listSharedMailboxes.js';
 export { 
   deleteEmailTool, 
   moveEmailTool, 

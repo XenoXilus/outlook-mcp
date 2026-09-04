@@ -494,6 +494,21 @@ export const batchProcessEmailsSchema = {
   },
 };
 
+export const listSharedMailboxesSchema = {
+  name: 'outlook_list_shared_mailboxes',
+  description: 'Discover which shared mailboxes the signed-in user can actually open. Graph has no API to enumerate delegated mailboxes, so this probes candidates — from the Known Shared Mailboxes setting, the Shared Mailbox setting, and the candidates argument — and reports accessible ones with inbox counts. Use it when the user references a shared mailbox vaguely ("the careers inbox") or asks what shared mailboxes are available.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      candidates: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Extra mailbox addresses to probe (e.g. ["careers@yourcompany.com"]) in addition to the configured ones',
+      },
+    },
+  },
+};
+
 // Export all email schemas as an array for easy iteration
 export const emailSchemas = [
   listEmailsSchema,
@@ -511,6 +526,7 @@ export const emailSchemas = [
   categorizeEmailSchema,
   archiveEmailSchema,
   batchProcessEmailsSchema,
+  listSharedMailboxesSchema,
 ];
 
 // Export mapping for quick lookup
@@ -530,4 +546,5 @@ export const emailSchemaMap = {
   'outlook_categorize_email': categorizeEmailSchema,
   'outlook_archive_email': archiveEmailSchema,
   'outlook_batch_process_emails': batchProcessEmailsSchema,
+  'outlook_list_shared_mailboxes': listSharedMailboxesSchema,
 };

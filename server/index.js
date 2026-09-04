@@ -93,6 +93,8 @@ process.on('uncaughtException', (error) => {
       categorizeEmailTool,
       archiveEmailTool,
       batchProcessEmailsTool,
+      // Shared-mailbox discovery
+      listSharedMailboxesTool,
       // Folder Management Tools
       listFoldersTool,
       createFolderTool,
@@ -273,6 +275,9 @@ process.on('uncaughtException', (error) => {
 
           case 'outlook_batch_process_emails':
             return await batchProcessEmailsTool(authManager, args);
+
+          case 'outlook_list_shared_mailboxes':
+            return await listSharedMailboxesTool(authManager, args);
 
           case 'outlook_list_folders':
             return await listFoldersTool(authManager, args);
