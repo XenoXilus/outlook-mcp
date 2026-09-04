@@ -121,7 +121,7 @@ To use this MCP server, you need to register an application in Microsoft Azure.
 6. Go to **API permissions** in the sidebar.
    - Click **Add a permission** -> **Microsoft Graph** -> **Delegated permissions**.
    - Add these permissions:
-     - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`
+     - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Mail.Read.Shared`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared`
      - `Calendars.Read`, `Calendars.ReadWrite`
      - `User.Read`, `MailboxSettings.Read`
      - `Files.Read.All`, `Files.ReadWrite.All`
@@ -291,6 +291,7 @@ The server uses OAuth 2.0 with PKCE for secure authentication:
 The app requests these Microsoft Graph permissions:
 
 - `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` - Email access
+- `Mail.Read.Shared`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared` - Shared/delegated mailbox email access (v1.3)
 - `Calendars.Read`, `Calendars.ReadWrite` - Calendar access  
 - `User.Read`, `MailboxSettings.Read` - User profile
 - `Files.Read.All`, `Files.ReadWrite.All` - OneDrive/SharePoint files
