@@ -218,8 +218,12 @@ export async function searchEmailsTool(authManager, args) {
 
         // Truncate if requested (default: true)
         if (truncate) {
+          const untruncated = processedContent;
           processedContent = truncateText(processedContent, maxLength);
-          emailData.truncated = true;
+          // Same rule as the single-message path: the flag describes the
+          // CONTENT. truncateText() returns its input untouched when it fits, so
+          // only a real cut may set it; otherwise the field stays absent.
+          if (processedContent !== untruncated) emailData.truncated = true;
         }
 
         emailData.body = {

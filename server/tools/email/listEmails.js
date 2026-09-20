@@ -164,8 +164,13 @@ export async function getEmailTool(authManager, args) {
 
       // Truncate if requested (default: true)
       if (truncate) {
+        const untruncated = processedContent;
         processedContent = truncateText(processedContent, maxLength);
-        emailData.truncated = true;
+        // The flag describes the CONTENT, never the request: truncateText()
+        // returns its input untouched when it already fits (textUtils.js:49), so
+        // having ASKED for truncation is no evidence that anything was cut.
+        // Only a real cut may set it; otherwise the field stays absent.
+        if (processedContent !== untruncated) emailData.truncated = true;
       }
 
       emailData.body.content = processedContent;

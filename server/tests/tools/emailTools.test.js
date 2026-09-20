@@ -84,6 +84,30 @@ describe('Email Tools Redesign', () => {
             expect(content.body.content).toBe(htmlContent);
             expect(content.truncated).toBeUndefined();
         });
+
+        it('must NOT report truncated when the body fits within maxLength', async () => {
+            // Regression: the flag was set inside `if (truncate)`, so it restated
+            // the REQUEST instead of the CONTENT — a short body came back flagged
+            // as truncated. truncateText() returns the input untouched when it
+            // fits (textUtils.js:49), so the flag must key off whether the text
+            // actually changed.
+            const mockEmail = {
+                id: '123',
+                subject: 'Short Email',
+                body: {
+                    contentType: 'text',
+                    content: 'Short body that easily fits.'
+                }
+            };
+
+            mockGraphApiClient.makeRequest.mockResolvedValue(mockEmail);
+
+            const result = await getEmailTool(mockAuthManager, { messageId: '123' });
+            const content = JSON.parse(result.content[0].text);
+
+            expect(content.body.content).toBe('Short body that easily fits.');
+            expect(content.truncated).toBeUndefined();
+        });
     });
 
     describe('searchEmailsTool', () => {
@@ -144,6 +168,32 @@ describe('Email Tools Redesign', () => {
             expect(content.emails[0].body.contentType).toBe('text');
             expect(content.emails[0].body.content.length).toBeLessThan(2000);
             expect(content.emails[0].truncated).toBe(true);
+        });
+
+        it('must NOT report truncated when the included body fits within maxLength', async () => {
+            // Same regression as the getEmailTool case: an included body that fits
+            // must not be flagged as truncated.
+            const mockResponse = {
+                value: [{
+                    id: '123',
+                    subject: 'Short',
+                    body: {
+                        contentType: 'text',
+                        content: 'Short body that easily fits.'
+                    }
+                }]
+            };
+
+            mockGraphApiClient.makeRequest.mockResolvedValue(mockResponse);
+
+            const result = await searchEmailsTool(mockAuthManager, {
+                query: 'test',
+                includeBody: true
+            });
+            const content = JSON.parse(result.content[0].text);
+
+            expect(content.emails[0].body.content).toBe('Short body that easily fits.');
+            expect(content.emails[0].truncated).toBeUndefined();
         });
 
         // A date-only endDate used to be sent as `le 2026-08-31`, which Graph
