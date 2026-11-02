@@ -1,9 +1,10 @@
 /**
  * Structured receipt extraction tool (FR-3).
  *
- * Returns a compact typed summary of a receipt email (amount, currency,
- * numbers, product label, billing link, attachment ids) — a few KB at most,
- * never the raw 60-100 KB HTML body.
+ * Returns a compact typed summary of a receipt email (amounts with
+ * subtotal/tax/credits/total, line items, receipt/invoice/order numbers,
+ * product label, quoted original sender for forwards, billing and receipt PDF
+ * links, attachment ids) — a few KB at most, never the raw 60-100 KB HTML body.
  */
 
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';

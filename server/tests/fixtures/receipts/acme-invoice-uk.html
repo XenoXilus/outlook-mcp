@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<!--
+  Fictional fixture: Acme, Inc is an invented merchant. Rendered to acme-invoice-uk.pdf with
+  renderHtmlToPdfBuffer (server/tools/receipts/htmlToPdf.js). Regenerate the PDF if this changes.
+  Layout: table rows with qty / unit price / tax / amount columns, UK VAT block, label and value on one line.
+-->
+<html><head><meta charset="utf-8"><style>
+body{font-family:Helvetica,Arial,sans-serif;font-size:11px;margin:40px}
+table{width:100%;border-collapse:collapse}
+td,th{padding:4px 6px;text-align:left}
+.r{text-align:right}
+.totals{width:50%;margin-left:50%}
+h1{font-size:22px}
+</style></head><body>
+<h1>Invoice</h1>
+<table style="width:60%"><tr><td>Invoice number</td><td>ZQXV9876-0042</td></tr>
+<tr><td>Date of issue</td><td>March 12, 2026</td></tr>
+<tr><td>Date due</td><td>March 12, 2026</td></tr></table>
+<p><b>Acme, Inc</b><br>1 Example Street<br>London, UK<br>billing@acme.example</p>
+<p>Bill to<br>Initech Ltd<br>2 Sample Road</p>
+<h2>£86.40 paid on March 12, 2026</h2>
+<table><thead><tr><th>Description</th><th class="r">Qty</th><th class="r">Unit price</th><th class="r">Tax</th><th class="r">Amount</th></tr></thead>
+<tbody>
+<tr><td>Studio plan - 3x<br><span style="color:#777">Mar 12 – Apr 12, 2026</span></td><td class="r">1</td><td class="r">£60.00</td><td class="r">20%</td><td class="r">£60.00</td></tr>
+<tr><td>Gadget plan - Lite</td><td class="r">2</td><td class="r">£6.00</td><td class="r">20%</td><td class="r">£12.00</td></tr>
+</tbody></table>
+<table class="totals">
+<tr><td>Subtotal</td><td class="r">£72.00</td></tr>
+<tr><td>Total excluding tax</td><td class="r">£72.00</td></tr>
+<tr><td>VAT - United Kingdom (20% on £72.00)</td><td class="r">£14.40</td></tr>
+<tr><td>Total</td><td class="r">£86.40</td></tr>
+<tr><td>Amount paid</td><td class="r">£86.40</td></tr>
+</table>
+</body></html>

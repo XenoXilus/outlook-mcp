@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<!--
+  Fictional fixture: Globex Corporation is an invented merchant. Rendered to globex-receipt-usage.pdf with
+  renderHtmlToPdfBuffer (server/tools/receipts/htmlToPdf.js). Regenerate the PDF if this changes.
+  Layout: every label and value is its own block, so pdf text puts them on consecutive lines;
+  usage lines (some $0.00), an included-usage credit and no tax.
+-->
+<html><head><meta charset="utf-8"><style>
+body{font-family:Helvetica,Arial,sans-serif;font-size:12px;margin:40px}
+div{margin:3px 0}
+.h{font-size:20px;margin-bottom:10px}
+.p{margin-top:12px;color:#555}
+</style></head><body>
+<div class="h">Receipt</div>
+<div>Receipt number</div>
+<div>5555-0000-4321</div>
+<div>Date paid</div>
+<div>March 17, 2026</div>
+<div>Payment method</div>
+<div>Visa - 4242</div>
+<div class="p">Feb 17 – Mar 17, 2026</div>
+<div>Archive storage (per GB)</div>
+<div>Qty 0</div>
+<div>$0.00</div>
+<div>Build time (per runner / min)</div>
+<div>Qty 12,345</div>
+<div>$8.50</div>
+<div>$0.00068858 each</div>
+<div>Data transfer</div>
+<div>Qty 98,000</div>
+<div>$4.00</div>
+<div>$0.00004082 each</div>
+<div class="p">Mar 17 – Apr 17, 2026</div>
+<div>Starter plan</div>
+<div>Qty 1</div>
+<div>$22.00</div>
+<div>Subtotal</div>
+<div>$34.50</div>
+<div>Starter plan allowance ($14.00 off)</div>
+<div>-$12.50</div>
+<div>Total</div>
+<div>$22.00</div>
+<div>Amount paid</div>
+<div>$22.00</div>
+</body></html>
