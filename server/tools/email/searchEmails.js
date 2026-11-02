@@ -1,7 +1,110 @@
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
 import { createSafeResponse } from '../../utils/jsonUtils.js';
 import { stripHtml, truncateText } from '../../utils/textUtils.js';
-import { getMailboxBase, toStartDateTime, endDateFilterClause } from '../../graph/graphHelpers.js';
+import {
+  getMailboxBase,
+  toStartDateTime,
+  toExclusiveEndDateTime,
+  endDateFilterClause
+} from '../../graph/graphHelpers.js';
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const HAS_UTC_OFFSET = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+// Whitespace separates KQL terms; quotes, parentheses, ':' and comparison
+// characters are KQL syntax. A value containing any of them has to be quoted.
+const KQL_NEEDS_QUOTES = /[\s"():<>=]/;
+
+const text = (value) => String(value ?? '').trim();
+
+// Epoch millis for a date or date-time. Date-only and zone-less input is read
+// as UTC, never local time. Returns null when the value cannot be parsed.
+function toUtcMillis(value) {
+  const input = text(value);
+  const iso = DATE_ONLY.test(input) ? `${input}T00:00:00Z` : (HAS_UTC_OFFSET.test(input) ? input : `${input}Z`);
+  const millis = Date.parse(iso);
+  return Number.isNaN(millis) ? null : millis;
+}
+
+// KQL date operand: the UTC calendar date as YYYY-MM-DD, independent of the
+// host's locale and timezone (toLocaleDateString is both, and M/D/YYYY is ambiguous).
+function toKqlDate(value) {
+  return new Date(toUtcMillis(value)).toISOString().slice(0, 10);
+}
+
+// A KQL value is quoted only when it needs to be. Inner quotes are dropped:
+// the whole expression is quoted again for $search, and a nested quote cannot
+// be expressed unambiguously inside a quoted value.
+function toKqlValue(value) {
+  return KQL_NEEDS_QUOTES.test(value) ? `"${value.replace(/"/g, '')}"` : value;
+}
+
+// KQL clauses for each requested restriction. Property restrictions stay
+// unquoted (`from:value`, `received:2026-10-01..2026-10-31`): KQL reads a
+// quoted `received:...` as a literal phrase, not a property restriction, and
+// only the value after the colon may be quoted.
+function buildKqlClauses({ queryText, fromText, subjectText, startBound, endBound }) {
+  let received = null;
+  if (startBound && endBound) {
+    received = `received:${toKqlDate(startBound)}..${toKqlDate(endBound)}`;
+  } else if (startBound) {
+    received = `received>=${toKqlDate(startBound)}`;
+  } else if (endBound) {
+    received = `received<=${toKqlDate(endBound)}`;
+  }
+
+  return {
+    text: queryText ? toKqlValue(queryText) : null,
+    from: fromText ? `from:${toKqlValue(fromText)}` : null,
+    subject: subjectText ? `subject:${toKqlValue(subjectText)}` : null,
+    received
+  };
+}
+
+// Predicate over raw Graph messages that re-checks every requested restriction
+// client-side, so a response the service failed to filter is never returned as-is.
+function buildRestrictionGuard({ fromText, subjectText, startBound, endBound }) {
+  const startMs = startBound ? toUtcMillis(toStartDateTime(startBound)) : null;
+  // End semantics mirror endDateFilterClause: a date-only end covers the whole
+  // day (exclusive next midnight), an explicit date-time end is inclusive.
+  const exclusiveEnd = endBound ? toExclusiveEndDateTime(endBound) : null;
+  const endMs = endBound ? toUtcMillis(exclusiveEnd || endBound) : null;
+  const fromNeedle = fromText.toLowerCase();
+  const subjectNeedle = subjectText.toLowerCase();
+  const contains = (haystack, needle) => String(haystack ?? '').toLowerCase().includes(needle);
+
+  return (message) => {
+    if (startMs !== null || endMs !== null) {
+      const receivedMs = toUtcMillis(message.receivedDateTime);
+      // A message whose date cannot be checked against the window is dropped
+      if (receivedMs === null) return false;
+      if (startMs !== null && receivedMs < startMs) return false;
+      if (endMs !== null && (exclusiveEnd ? receivedMs >= endMs : receivedMs > endMs)) return false;
+    }
+
+    if (fromNeedle) {
+      const sender = message.from?.emailAddress;
+      if (!contains(sender?.address, fromNeedle) && !contains(sender?.name, fromNeedle)) return false;
+    }
+
+    if (subjectNeedle && !contains(message.subject, subjectNeedle)) return false;
+
+    return true;
+  };
+}
+
+// Merge order for results gathered from several folder requests: follows the
+// first $orderby clause (e.g. 'receivedDateTime desc').
+function compareByOrderBy(orderBy) {
+  const [field = 'receivedDateTime', direction = 'asc'] = text(orderBy).split(',')[0].trim().split(/\s+/);
+  const sign = direction.toLowerCase() === 'desc' ? -1 : 1;
+  const read = (message) => field.split('/').reduce((value, key) => value?.[key], message) ?? '';
+  return (a, b) => {
+    const left = read(a);
+    const right = read(b);
+    if (left === right) return 0;
+    return left < right ? -sign : sign;
+  };
+}
 
 // Search emails with intelligent KQL/OData strategy selection
 export async function searchEmailsTool(authManager, args) {
@@ -21,11 +124,23 @@ export async function searchEmailsTool(authManager, args) {
     mailbox
   } = args;
 
+  const queryText = text(query);
+  const fromText = text(from);
+  const subjectText = text(subject);
+  const startBound = text(startDate);
+  const endBound = text(endDate);
+
   // Cap limit at 5 when includeBody is true to prevent context overflow
   const effectiveLimit = includeBody ? Math.min(limit, 5) : limit;
   const limitWasCapped = includeBody && limit > 5;
 
   try {
+    for (const [name, bound] of [['startDate', startBound], ['endDate', endBound]]) {
+      if (bound && toUtcMillis(bound) === null) {
+        return createValidationError(name, `'${bound}' is not a valid ISO 8601 date or date-time`);
+      }
+    }
+
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
     const mailboxBase = getMailboxBase(mailbox);
@@ -52,34 +167,25 @@ export async function searchEmailsTool(authManager, args) {
         return createValidationError('folders', folderError.message);
       }
     }
+    const folderIds = [...new Set(resolvedFolderIds)];
 
-    // Determine search strategy and endpoint
-    let endpoint = `${mailboxBase}/messages`;
+    // Determine search strategy and endpoint(s)
+    let endpoints = [`${mailboxBase}/messages`];
     let useKQLSearch = false;
     let useODataFilters = false;
-    const isSpecificFolder = resolvedFolderIds.length === 1;
+    let kql = null;
 
-    if (isSpecificFolder) {
-      // Single folder search
-      endpoint = `${mailboxBase}/mailFolders/${resolvedFolderIds[0]}/messages`;
+    if (folderIds.length > 0) {
+      // A folder restriction is bound by the endpoint itself: one request per
+      // folder (results are merged below), never a fall-back to all folders.
+      endpoints = folderIds.map(folderId => `${mailboxBase}/mailFolders/${folderId}/messages`);
       useODataFilters = true;
-    } else if (resolvedFolderIds.length > 1) {
-      // Multiple folders - we'll need to make separate requests and combine
-      // For now, fall back to all folders search
-      endpoint = `${mailboxBase}/messages`;
-      useODataFilters = true;
+    } else if (queryText) {
+      // Use KQL search for text queries (more efficient for content search)
+      useKQLSearch = true;
     } else {
-      // All folders search (folders.length === 0)
-      endpoint = `${mailboxBase}/messages`;
-
-      // Decide between KQL search and OData filters
-      if (query) {
-        // Use KQL search for text queries (more efficient for content search)
-        useKQLSearch = true;
-      } else {
-        // Use OData filters for sender/subject/date searches (more comprehensive)
-        useODataFilters = true;
-      }
+      // Use OData filters for sender/subject/date searches (more comprehensive)
+      useODataFilters = true;
     }
 
     // Build search parameters based on chosen strategy
@@ -92,38 +198,41 @@ export async function searchEmailsTool(authManager, args) {
       // Date-only bounds are expanded so the window covers the whole final day:
       // a bare `le 2026-08-31` means midnight and silently drops the 31st.
       if (orderBy && orderBy.includes('receivedDateTime')) {
-        if (startDate) {
-          filterConditions.push(`receivedDateTime ge ${toStartDateTime(startDate)}`);
+        if (startBound) {
+          filterConditions.push(`receivedDateTime ge ${toStartDateTime(startBound)}`);
         } else {
           // Add a broad receivedDateTime filter to satisfy API requirements
           filterConditions.push(`receivedDateTime ge 1900-01-01T00:00:00Z`);
         }
 
-        if (endDate) {
-          filterConditions.push(endDateFilterClause(endDate));
+        if (endBound) {
+          filterConditions.push(endDateFilterClause(endBound));
         }
       } else {
         // Add date filters normally if not using receivedDateTime orderby
-        if (startDate) {
-          filterConditions.push(`receivedDateTime ge ${toStartDateTime(startDate)}`);
+        if (startBound) {
+          filterConditions.push(`receivedDateTime ge ${toStartDateTime(startBound)}`);
         }
 
-        if (endDate) {
-          filterConditions.push(endDateFilterClause(endDate));
+        if (endBound) {
+          filterConditions.push(endDateFilterClause(endBound));
         }
       }
 
-      if (from) {
-        filterConditions.push(`from/emailAddress/address eq '${from.replace(/'/g, "''")}'`);
+      if (fromText) {
+        filterConditions.push(`from/emailAddress/address eq '${fromText.replace(/'/g, "''")}'`);
       }
 
-      if (subject) {
-        filterConditions.push(`contains(subject,'${subject.replace(/'/g, "''")}')`);
+      if (subjectText) {
+        filterConditions.push(`contains(subject,'${subjectText.replace(/'/g, "''")}')`);
       }
 
-      if (query) {
-        // Use contains for general text search
-        filterConditions.push(`contains(subject,'${query.replace(/'/g, "''")}') or contains(body/content,'${query.replace(/'/g, "''")}')`);
+      if (queryText) {
+        // Use contains for general text search. Parenthesised: an unparenthesised
+        // `or` would split the whole conjunction and let body matches bypass
+        // every other restriction.
+        const escapedQuery = queryText.replace(/'/g, "''");
+        filterConditions.push(`(contains(subject,'${escapedQuery}') or contains(body/content,'${escapedQuery}'))`);
       }
 
       if (filterConditions.length > 0) {
@@ -134,57 +243,40 @@ export async function searchEmailsTool(authManager, args) {
       options.orderby = orderBy;
 
     } else if (useKQLSearch) {
-      // Use KQL search for text-based queries (combines text search with other filters)
-      const kqlTerms = [];
-      const filterConditions = [];
-
-      // General text search using KQL (more efficient for content search)
-      if (query) {
-        kqlTerms.push(`"${query.replace(/"/g, '\\"')}"`);
-      }
-
-      // For sender/subject/date filters, we'll use KQL when possible, OData filters as fallback
-      if (from) {
-        kqlTerms.push(`"from:${from.replace(/"/g, '\\"')}"`);
-      }
-
-      if (subject) {
-        kqlTerms.push(`"subject:${subject.replace(/"/g, '\\"')}"`);
-      }
-
-      // Date range using KQL format
-      if (startDate && endDate) {
-        const startFormatted = new Date(startDate).toLocaleDateString('en-US');
-        const endFormatted = new Date(endDate).toLocaleDateString('en-US');
-        kqlTerms.push(`"received:${startFormatted}..${endFormatted}"`);
-      } else if (startDate) {
-        const startFormatted = new Date(startDate).toLocaleDateString('en-US');
-        kqlTerms.push(`"received>=${startFormatted}"`);
-      } else if (endDate) {
-        const endFormatted = new Date(endDate).toLocaleDateString('en-US');
-        kqlTerms.push(`"received<=${endFormatted}"`);
-      }
-
-      // Combine all KQL terms with AND
-      if (kqlTerms.length > 0) {
-        options.search = kqlTerms.join(' AND ');
-      }
-
-      // Only add orderby if not using search (since search has its own sorting)
-      if (!options.search) {
-        options.orderby = orderBy;
-      }
+      // Graph does not allow $filter (or $orderby) together with $search on message
+      // collections, so a date window cannot move to $filter here: it travels inside
+      // the KQL, and the results are re-checked against it below.
+      kql = buildKqlClauses({ queryText, fromText, subjectText, startBound, endBound });
+      // Graph expects the whole KQL expression as one double-quoted $search value;
+      // quotes inside it are backslash-escaped.
+      const expression = [kql.text, kql.from, kql.subject, kql.received].filter(Boolean).join(' AND ');
+      options.search = `"${expression.replace(/"/g, '\\"')}"`;
     }
 
-    // Make the request using chosen search strategy
-    const result = await graphApiClient.makeRequest(endpoint, options);
+    // Make the request(s) using chosen search strategy
+    const fetched = [];
+    for (const endpoint of endpoints) {
+      const result = await graphApiClient.makeRequest(endpoint, options);
 
-    // Handle MCP error responses from makeRequest
-    if (result.content && result.isError !== undefined) {
-      return result;
+      // Handle MCP error responses from makeRequest
+      if (result.content && result.isError !== undefined) {
+        return result;
+      }
+
+      fetched.push(...(result.value || []));
     }
 
-    const emails = result.value?.map(email => {
+    // Defence in depth: whatever the service did with the query, never return a
+    // message that violates a requested date window, sender, or subject.
+    const matchesRestrictions = buildRestrictionGuard({ fromText, subjectText, startBound, endBound });
+    let messages = fetched.filter(matchesRestrictions);
+    const droppedOutsideFilters = fetched.length - messages.length;
+
+    if (endpoints.length > 1) {
+      messages = messages.sort(compareByOrderBy(orderBy)).slice(0, options.top);
+    }
+
+    const emails = messages.map(email => {
       const emailData = {
         id: email.id,
         subject: email.subject,
@@ -229,28 +321,39 @@ export async function searchEmailsTool(authManager, args) {
       }
 
       return emailData;
-    }) || [];
+    });
+
+    let dateRange = null;
+    if (useKQLSearch) {
+      dateRange = kql.received ? `KQL: ${kql.received}` : null;
+    } else if (startBound && endBound) {
+      dateRange = `Filter: receivedDateTime ge ${startBound} and receivedDateTime le ${endBound}`;
+    } else if (startBound) {
+      dateRange = `Filter: receivedDateTime ge ${startBound}`;
+    } else if (endBound) {
+      dateRange = `Filter: receivedDateTime le ${endBound}`;
+    }
 
     const searchSummary = {
       searchApproach: useKQLSearch ? 'KQL (Keyword Query Language)' : 'OData $filter',
       kqlQuery: options.search || null,
       filterQuery: options.filter || null,
-      endpoint: endpoint,
+      endpoint: endpoints.length === 1 ? endpoints[0] : endpoints,
       folders: folders.length > 0 ? folders : ['All folders'],
       parameters: {
-        generalSearch: query || null,
-        sender: from ? (useKQLSearch ? `KQL: from:${from}` : `Filter: from/emailAddress/address eq '${from}'`) : null,
-        subject: subject ? (useKQLSearch ? `KQL: subject:${subject}` : `Filter: contains(subject,'${subject}')`) : null,
-        dateRange: startDate && endDate ? (useKQLSearch ? `KQL: received:${new Date(startDate).toLocaleDateString('en-US')}..${new Date(endDate).toLocaleDateString('en-US')}` : `Filter: receivedDateTime ge ${startDate} and receivedDateTime le ${endDate}`) :
-          startDate ? (useKQLSearch ? `KQL: received>=${new Date(startDate).toLocaleDateString('en-US')}` : `Filter: receivedDateTime ge ${startDate}`) :
-            endDate ? (useKQLSearch ? `KQL: received<=${new Date(endDate).toLocaleDateString('en-US')}` : `Filter: receivedDateTime le ${endDate}`) : null
+        generalSearch: queryText || null,
+        sender: fromText ? (useKQLSearch ? `KQL: ${kql.from}` : `Filter: from/emailAddress/address eq '${fromText}'`) : null,
+        subject: subjectText ? (useKQLSearch ? `KQL: ${kql.subject}` : `Filter: contains(subject,'${subjectText}')`) : null,
+        dateRange
       },
       totalResults: emails.length,
+      droppedOutsideFilters,
       includesFullBody: includeBody,
       limitWasCapped: limitWasCapped,
       optimization: useKQLSearch ? 'Using KQL for text-based search (efficient for content search)' :
-        isSpecificFolder ? 'Using $filter for specific folder search (comprehensive)' :
-          'Using $filter for all-folders search (comprehensive across all folders)'
+        folderIds.length === 1 ? 'Using $filter for specific folder search (comprehensive)' :
+          folderIds.length > 1 ? 'Using $filter with one request per folder, merged (comprehensive)' :
+            'Using $filter for all-folders search (comprehensive across all folders)'
     };
 
     return createSafeResponse({
