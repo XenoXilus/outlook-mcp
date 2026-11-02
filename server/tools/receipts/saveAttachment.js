@@ -5,11 +5,11 @@
  * attachment bytes land at destDir/fileName under the receipts/work dir.
  */
 
-import { Buffer } from 'buffer';
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
 import { createSafeResponse } from '../../utils/jsonUtils.js';
 import { getMailboxBase } from '../../graph/graphHelpers.js';
 import { saveReceiptFile, renderFilenameTemplate, getFilenameTemplate } from '../../utils/receiptFiles.js';
+import { fetchAttachmentContent } from '../../graph/attachmentContent.js';
 import { selectPdfAttachment, detectVendor } from './receiptParser.js';
 import { loadReceiptRules } from './receiptRules.js';
 
@@ -35,6 +35,7 @@ export async function saveAttachmentCore(graphApiClient, args, rules = loadRecei
 
   const base = getMailboxBase(mailbox);
   let targetId = attachmentId;
+  let knownName = attachmentName;
 
   if (!targetId) {
     const list = throwIfMcpError(await graphApiClient.makeRequest(
@@ -61,6 +62,7 @@ export async function saveAttachmentCore(graphApiClient, args, rules = loadRecei
       throw new Error(`No suitable PDF attachment found on message ${messageId} (attachments: ${names})`);
     }
     targetId = selected.id;
+    knownName = selected.name;
   }
 
   // Fetch message details only when the template path is triggered
@@ -82,18 +84,11 @@ export async function saveAttachmentCore(graphApiClient, args, rules = loadRecei
     }
   }
 
-  // This select must stay byte-identical to downloadAttachment's proven shape:
-  // Graph rejects a $select that asks for the fileAttachment-only contentBytes
-  // without lastModifiedDateTime/@odata.type alongside it (400 Bad Request).
-  const full = throwIfMcpError(await graphApiClient.makeRequest(
-    `${base}/messages/${messageId}/attachments/${targetId}`,
-    { select: 'id,name,contentType,size,isInline,lastModifiedDateTime,contentBytes,@odata.type' }
-  ));
-  if (!full.contentBytes) {
-    throw new Error(`Attachment '${full.name || targetId}' has no contentBytes (not a file attachment)`);
-  }
-
-  const buffer = Buffer.from(full.contentBytes, 'base64');
+  // Throws an Error carrying `fetchDetails` (attempted routes, ids, last Graph error)
+  // when the bytes cannot be fetched.
+  const { buffer, attachment: full } = await fetchAttachmentContent(
+    graphApiClient, base, messageId, targetId, { attachmentName: knownName }
+  );
 
   let finalFileName;
   if (fileName) {
@@ -102,15 +97,15 @@ export async function saveAttachmentCore(graphApiClient, args, rules = loadRecei
     const template = filenameTemplate || getFilenameTemplate();
     finalFileName = renderFilenameTemplate(template, { vendor: resolvedVendor, date: resolvedDate });
   } else {
-    finalFileName = full.name;
+    finalFileName = full.name || knownName;
   }
 
   const saved = await saveReceiptFile(buffer, destDir, finalFileName, { onExisting });
 
   return {
     ...saved,
-    attachmentId: full.id,
-    attachmentName: full.name,
+    attachmentId: full.id || targetId,
+    attachmentName: full.name || knownName,
     contentType: full.contentType,
     messageId
   };

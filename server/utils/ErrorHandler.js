@@ -11,6 +11,8 @@
  * maintaining security by sanitizing sensitive information.
  */
 
+import { formatGraphErrorText } from './mcpErrorResponse.js';
+
 // Custom error classes for type-safe error handling
 export class MCPError extends Error {
   constructor(message, code, details = {}) {
@@ -136,6 +138,11 @@ export class ErrorHandler {
           classification.category = 'auth_error';
           classification.severity = 'high';
           classification.retryable = true;
+          break;
+        case 400:
+          classification.category = 'client_error';
+          classification.severity = 'medium';
+          classification.retryable = false;
           break;
         case 403:
           classification.category = 'client_error';
@@ -380,6 +387,14 @@ export class ErrorHandler {
 
   getUserFriendlyMessage(error, classification) {
     const baseMessage = this.sanitizeMessage(error.message);
+
+    // A rejected Graph request keeps what Graph said (status, code, message,
+    // request ids, method + URL). The structured copy holds no credentials,
+    // and sanitising would mangle the ids it exists to preserve.
+    if (error.graphError && (classification.category === 'client_error' || classification.category === 'unknown')) {
+      const prefix = classification.category === 'client_error' ? 'Invalid request.' : 'Graph API error.';
+      return `${prefix} ${formatGraphErrorText(error.graphError)}`;
+    }
     
     switch (classification.category) {
       case 'rate_limit':
@@ -495,6 +510,7 @@ export class ErrorHandler {
     if (error.statusCode) details.statusCode = error.statusCode;
     if (error.code) details.code = error.code;
     if (error.name) details.name = error.name;
+    if (error.graphError) details.graphError = error.graphError;
     
     return details;
   }

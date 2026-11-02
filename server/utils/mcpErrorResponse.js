@@ -90,8 +90,34 @@ export function convertErrorToToolError(error, context = '') {
   if (error?.correlationId) details.correlationId = error.correlationId;
   if (error?.correlationIds) details.correlationIds = error.correlationIds;
   if (error?.retryAfter) details.retryAfter = error.retryAfter;
+  // Structured Graph failure (status/code/message/request ids/method/url) so
+  // callers can propagate it without re-parsing the message text.
+  const graphError = error?.graphError || error?.fetchDetails?.graphError;
+  if (graphError) details.graphError = graphError;
+  if (error?.fetchDetails) details.fetchDetails = error.fetchDetails;
 
   return createToolError(message, details);
+}
+
+/**
+ * Renders a structured Graph failure as one line of verbatim diagnostics:
+ * HTTP status, Graph error code and message, the request ids Graph needs to
+ * trace the call, and the method + full URL (query string included) as sent.
+ * @param {Object} graphError - { status, code, message, requestId, clientRequestId, date, method, url }
+ * @returns {string}
+ */
+export function formatGraphErrorText(graphError) {
+  const g = graphError || {};
+  const status = g.status ? `HTTP ${g.status}` : 'No HTTP response';
+  const code = g.code ? ` ${g.code}` : '';
+  const message = g.message || 'No error message returned';
+  const ids = [];
+  if (g.requestId) ids.push(`request-id: ${g.requestId}`);
+  if (g.clientRequestId) ids.push(`client-request-id: ${g.clientRequestId}`);
+  if (g.date) ids.push(`date: ${g.date}`);
+  const idPart = ids.length > 0 ? ` [${ids.join('; ')}]` : '';
+  const request = g.url ? ` ${g.method ? `${g.method} ` : ''}${g.url}` : '';
+  return `${status}${code}: ${message}${idPart}${request}`;
 }
 
 /**

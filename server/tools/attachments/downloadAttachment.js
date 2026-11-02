@@ -6,11 +6,7 @@ import { handleLargeContent, saveBase64File } from '../../utils/fileOutput.js';
 import { safeStringify, createSafeResponse } from '../../utils/jsonUtils.js';
 import { saveReceiptFile } from '../../utils/receiptFiles.js';
 import { getMailboxBase } from '../../graph/graphHelpers.js';
-
-// Proven-working $select for fetching attachment bytes. Graph rejects a select
-// that asks for the fileAttachment-only contentBytes without
-// lastModifiedDateTime/@odata.type alongside it (400 Bad Request).
-const CONTENT_SELECT = 'id,name,contentType,size,isInline,lastModifiedDateTime,contentBytes,@odata.type';
+import { fetchAttachmentContent, ATTACHMENT_META_SELECT } from '../../graph/attachmentContent.js';
 
 // Cap for inline tool responses. The practical limit is the MCP client's
 // tool-output token budget (~25k tokens): a 37 KB PDF's inline base64 already
@@ -408,10 +404,21 @@ export async function downloadAttachmentTool(authManager, args) {
 
     console.error(`Debug: Downloading attachment ${attachmentId} from message ${messageId}`);
 
-    // First, get attachment metadata and type
-    const attachment = throwIfMcpError(await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}/attachments/${attachmentId}`, {
-      select: 'id,name,contentType,size,isInline,lastModifiedDateTime,@odata.type'
-    }));
+    const wantsFile = saveToFile || destDir || fileName;
+    let attachment;
+    let fetched = null;
+
+    if (wantsFile) {
+      // File delivery fetches the bytes anyway, and the same response carries the metadata.
+      fetched = await fetchAttachmentContent(graphApiClient, mailboxBase, messageId, attachmentId);
+      attachment = fetched.attachment;
+    } else {
+      // Metadata only. '@odata.type' is not a selectable property (Graph answers 400);
+      // it comes back on attachment items without being requested.
+      attachment = throwIfMcpError(await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}/attachments/${attachmentId}`, {
+        select: ATTACHMENT_META_SELECT
+      }));
+    }
 
     console.error(`Debug: Attachment type: ${attachment['@odata.type']}, size: ${attachment.size}, contentType: "${attachment.contentType}"`);
 
@@ -428,25 +435,12 @@ export async function downloadAttachmentTool(authManager, args) {
 
     // File-delivery mode: write the raw bytes server-side and return only
     // metadata — inline base64 must never be the only route for binary content.
-    if (saveToFile || destDir || fileName) {
-      const odataType = attachment['@odata.type'];
-      if (odataType === '#microsoft.graph.itemAttachment' || odataType === '#microsoft.graph.referenceAttachment') {
-        throw new Error(
-          `Attachment '${attachment.name}' is not a file attachment (${odataType}); ` +
-          'only file attachments can be saved to disk'
-        );
+    if (fetched) {
+      const targetName = fileName || attachment.name;
+      if (!targetName) {
+        throw new Error(`Attachment ${attachmentId} has no name; provide fileName to save it`);
       }
-
-      const full = throwIfMcpError(await graphApiClient.makeRequest(
-        `${mailboxBase}/messages/${messageId}/attachments/${attachmentId}`,
-        { select: CONTENT_SELECT }
-      ));
-      if (!full.contentBytes) {
-        throw new Error(`Attachment '${attachment.name}' has no contentBytes to save`);
-      }
-
-      const buffer = Buffer.from(full.contentBytes, 'base64');
-      const saved = await saveReceiptFile(buffer, destDir, fileName || attachment.name, { onExisting });
+      const saved = await saveReceiptFile(fetched.buffer, destDir, targetName, { onExisting });
 
       return createSafeResponse({
         ...attachmentInfo,
@@ -463,61 +457,14 @@ export async function downloadAttachmentTool(authManager, args) {
       try {
         console.error('Debug: Attempting to download attachment content...');
         
+        const odataType = attachment['@odata.type'];
+
         // Try different approaches based on attachment type
-        if (attachment['@odata.type'] === '#microsoft.graph.fileAttachment') {
-          // Standard file attachment - request with contentBytes
-          const fullAttachment = await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}/attachments/${attachmentId}`, {
-            select: CONTENT_SELECT
-          });
-          
-          if (fullAttachment.contentBytes) {
-            if (decodeContent) {
-              // Decode the Base64 content appropriately
-              const decodedContent = await decodeAttachmentContent(
-                fullAttachment.contentBytes, 
-                attachment.contentType, 
-                attachment.name
-              );
-              
-              // Add decoded content info
-              attachmentInfo.content = decodedContent.content;
-              attachmentInfo.decodedContentType = decodedContent.type;
-              attachmentInfo.encoding = decodedContent.encoding;
-              attachmentInfo.contentIncluded = true;
-              
-              // Keep raw Base64 for binary files or when needed
-              if (decodedContent.contentBytes) {
-                attachmentInfo.contentBytes = decodedContent.contentBytes;
-              }
-              
-              // Add any additional info
-              if (decodedContent.note) {
-                attachmentInfo.note = decodedContent.note;
-              }
-              
-              if (decodedContent.error) {
-                attachmentInfo.decodingError = decodedContent.error;
-              }
-              
-              console.error(`Debug: Successfully downloaded and decoded content (type: ${decodedContent.type}, size: ${decodedContent.size} bytes)`);
-            } else {
-              // Return raw Base64 content
-              attachmentInfo.contentBytes = fullAttachment.contentBytes;
-              attachmentInfo.contentIncluded = true;
-              attachmentInfo.encoding = 'base64';
-              attachmentInfo.note = 'Raw Base64 content (set decodeContent: true to decode)';
-              console.error(`Debug: Successfully downloaded raw content (${fullAttachment.contentBytes.length} Base64 characters)`);
-            }
-          } else {
-            attachmentInfo.contentIncluded = false;
-            attachmentInfo.contentError = 'No content bytes returned from API';
-          }
-          
-        } else if (attachment['@odata.type'] === '#microsoft.graph.itemAttachment') {
+        if (odataType === '#microsoft.graph.itemAttachment') {
           // Item attachment (embedded message/calendar item)
-          const fullAttachment = await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}/attachments/${attachmentId}`, {
+          const fullAttachment = throwIfMcpError(await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}/attachments/${attachmentId}`, {
             expand: 'item'
-          });
+          }));
           
           if (fullAttachment.item) {
             attachmentInfo.itemContent = fullAttachment.item;
@@ -529,9 +476,9 @@ export async function downloadAttachmentTool(authManager, args) {
             attachmentInfo.contentError = 'No item content available for item attachment';
           }
           
-        } else if (attachment['@odata.type'] === '#microsoft.graph.referenceAttachment') {
+        } else if (odataType === '#microsoft.graph.referenceAttachment') {
           // Reference attachment (link to SharePoint/OneDrive)
-          const fullAttachment = await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}/attachments/${attachmentId}`);
+          const fullAttachment = throwIfMcpError(await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}/attachments/${attachmentId}`));
           
           attachmentInfo.sourceUrl = fullAttachment.sourceUrl;
           attachmentInfo.providerType = fullAttachment.providerType;
@@ -544,55 +491,59 @@ export async function downloadAttachmentTool(authManager, args) {
           console.error('Debug: Reference attachment processed, sourceUrl:', fullAttachment.sourceUrl);
           
         } else {
-          // Unknown attachment type - try the standard approach
-          console.error('Debug: Unknown attachment type, trying standard contentBytes approach');
-          const fullAttachment = await graphApiClient.makeRequest(`${mailboxBase}/messages/${messageId}/attachments/${attachmentId}`);
-          
-          if (fullAttachment.contentBytes) {
-            if (decodeContent) {
-              // Decode the Base64 content for unknown types too
-              const decodedContent = await decodeAttachmentContent(
-                fullAttachment.contentBytes, 
-                attachment.contentType, 
-                attachment.name
-              );
-              
-              attachmentInfo.content = decodedContent.content;
-              attachmentInfo.decodedContentType = decodedContent.type;
-              attachmentInfo.encoding = decodedContent.encoding;
-              attachmentInfo.contentIncluded = true;
-              
-              if (decodedContent.contentBytes) {
-                attachmentInfo.contentBytes = decodedContent.contentBytes;
-              }
-              
-              if (decodedContent.note) {
-                attachmentInfo.note = decodedContent.note;
-              }
-            } else {
-              // Return raw Base64 content
-              attachmentInfo.contentBytes = fullAttachment.contentBytes;
-              attachmentInfo.contentIncluded = true;
-              attachmentInfo.encoding = 'base64';
+          // File attachment (or a type Graph did not label): fetch the bytes, with the raw-bytes fallback
+          const { buffer } = await fetchAttachmentContent(graphApiClient, mailboxBase, messageId, attachmentId);
+          const contentBytes = buffer.toString('base64');
+
+          if (decodeContent) {
+            // Decode the Base64 content appropriately
+            const decodedContent = await decodeAttachmentContent(
+              contentBytes, 
+              attachment.contentType, 
+              attachment.name
+            );
+            
+            // Add decoded content info
+            attachmentInfo.content = decodedContent.content;
+            attachmentInfo.decodedContentType = decodedContent.type;
+            attachmentInfo.encoding = decodedContent.encoding;
+            attachmentInfo.contentIncluded = true;
+            
+            // Keep raw Base64 for binary files or when needed
+            if (decodedContent.contentBytes) {
+              attachmentInfo.contentBytes = decodedContent.contentBytes;
             }
+            
+            // Add any additional info
+            if (decodedContent.note) {
+              attachmentInfo.note = decodedContent.note;
+            }
+            
+            if (decodedContent.error) {
+              attachmentInfo.decodingError = decodedContent.error;
+            }
+            
+            console.error(`Debug: Successfully downloaded and decoded content (type: ${decodedContent.type}, size: ${decodedContent.size} bytes)`);
           } else {
-            attachmentInfo.contentIncluded = false;
-            attachmentInfo.contentError = `Unsupported attachment type: ${attachment['@odata.type']}`;
-            // Include the full response for debugging
-            attachmentInfo.debugInfo = {
-              availableFields: Object.keys(fullAttachment),
-              odataType: attachment['@odata.type']
-            };
+            // Return raw Base64 content
+            attachmentInfo.contentBytes = contentBytes;
+            attachmentInfo.contentIncluded = true;
+            attachmentInfo.encoding = 'base64';
+            attachmentInfo.note = 'Raw Base64 content (set decodeContent: true to decode)';
+            console.error(`Debug: Successfully downloaded raw content (${contentBytes.length} Base64 characters)`);
           }
         }
         
       } catch (contentError) {
         console.error('Debug: Error downloading attachment content:', contentError);
         attachmentInfo.contentIncluded = false;
-        attachmentInfo.contentError = `Failed to download content: ${contentError.message}`;
+        // A thrown MCP error object carries its text in content[0], not in .message
+        attachmentInfo.contentError = `Failed to download content: ${contentError.message || contentError.content?.[0]?.text}`;
         attachmentInfo.errorDetails = {
           statusCode: contentError.statusCode,
-          code: contentError.code
+          code: contentError.code,
+          ...(contentError.fetchDetails && { fetchDetails: contentError.fetchDetails }),
+          ...(contentError._errorDetails?.graphError && { graphError: contentError._errorDetails.graphError })
         };
       }
     } else {

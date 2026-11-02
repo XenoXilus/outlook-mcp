@@ -1,6 +1,7 @@
-import { Client } from '@microsoft/microsoft-graph-client';
+import { Buffer } from 'buffer';
+import { Client, ResponseType } from '@microsoft/microsoft-graph-client';
 import { authConfig } from '../auth/config.js';
-import { convertErrorToToolError, createServiceUnavailableError, createRateLimitError, createValidationError } from '../utils/mcpErrorResponse.js';
+import { convertErrorToToolError, createServiceUnavailableError, createRateLimitError, createValidationError, formatGraphErrorText } from '../utils/mcpErrorResponse.js';
 import { FolderResolver } from './folderResolver.js';
 import { safeStringify } from '../utils/jsonUtils.js';
 
@@ -18,6 +19,81 @@ export function encodeODataQueryValue(value) {
     .replace(/\+/g, '%2B')
     .replace(/&/g, '%26')
     .replace(/#/g, '%23');
+}
+
+/**
+ * Read one response header from whatever the SDK attached to the error. The
+ * SDK copies the fetch `Headers` instance onto GraphError.headers, which has
+ * no enumerable properties — bracket access on it always yields undefined, so
+ * `.get()` must be used when present. Plain objects (tests, other transports)
+ * are matched case-insensitively.
+ */
+export function readHeader(headers, name) {
+  if (!headers) return undefined;
+  if (typeof headers.get === 'function') {
+    const value = headers.get(name);
+    return value === null || value === undefined ? undefined : value;
+  }
+  const wanted = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === wanted) return headers[key];
+  }
+  return undefined;
+}
+
+/**
+ * Decode GraphError.body into the Graph `error` object ({ code, message,
+ * innerError }). The SDK stores it as a JSON *string* of that inner object;
+ * for requests made with an ARRAYBUFFER response type the failure body is the
+ * undecoded bytes instead. Returns null when the body is not a Graph error.
+ */
+export function parseGraphErrorBody(body) {
+  let parsed = body;
+  if (body instanceof ArrayBuffer) parsed = Buffer.from(body).toString('utf8');
+  else if (ArrayBuffer.isView(body)) parsed = Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('utf8');
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  return parsed.error && typeof parsed.error === 'object' ? parsed.error : parsed;
+}
+
+/**
+ * Fill in the fields the SDK leaves empty when a failure body could not be
+ * decoded at throw time (binary requests): code and message come from the
+ * parsed body so downstream checks such as `code === 'TooManyRequests'` still work.
+ */
+function normalizeGraphError(error) {
+  if (!error || typeof error !== 'object') return error;
+  const body = parseGraphErrorBody(error.body);
+  if (body) {
+    if (!error.code && body.code) error.code = body.code;
+    if (!error.message && body.message) error.message = body.message;
+  }
+  return error;
+}
+
+function toBinaryBuffer(value) {
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof ArrayBuffer) return Buffer.from(value);
+  if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  return Buffer.alloc(0);
+}
+
+// Full URL as sent (host, version, path, query string). buildFullUrl is
+// private in the SDK typings but is the only place the final query string is
+// assembled, so fall back to the bare path if it ever disappears.
+function describeRequestUrl(request, fallback) {
+  try {
+    if (request && typeof request.buildFullUrl === 'function') return request.buildFullUrl();
+  } catch {
+    // fall through
+  }
+  return fallback;
 }
 
 export class GraphApiClient {
@@ -104,72 +180,79 @@ export class GraphApiClient {
   }
 
   extractRetryAfter(error) {
-    // Check for Retry-After header in various formats
-    if (error.headers) {
-      const retryAfter = error.headers['retry-after'] || error.headers['Retry-After'];
-      if (retryAfter) {
-        const seconds = parseInt(retryAfter);
-        return !isNaN(seconds) ? seconds * 1000 : null; // Convert to milliseconds
-      }
+    // Check for Retry-After header (fetch Headers instance or plain object)
+    const retryAfter = readHeader(error?.headers, 'retry-after');
+    if (retryAfter) {
+      const seconds = parseInt(retryAfter);
+      return !isNaN(seconds) ? seconds * 1000 : null; // Convert to milliseconds
     }
-    
+
     // Check in error response body
-    if (error.body && error.body.error) {
-      const innerError = error.body.error.innerError;
-      if (innerError && innerError['retry-after-ms']) {
-        return parseInt(innerError['retry-after-ms']);
-      }
+    const innerError = parseGraphErrorBody(error?.body)?.innerError;
+    if (innerError && innerError['retry-after-ms']) {
+      return parseInt(innerError['retry-after-ms']);
     }
-    
+
     return null;
   }
 
-  extractErrorDetails(error, clientRequestId, path, method) {
+  extractErrorDetails(error, clientRequestId, path, method, url) {
+    normalizeGraphError(error);
+    const body = parseGraphErrorBody(error?.body);
+    const headers = error?.headers;
+    // GraphError carries `statusCode` (-1 when the request never got a response)
+    const rawStatus = error?.statusCode ?? error?.status;
+    const statusCode = Number.isInteger(rawStatus) && rawStatus > 0 ? rawStatus : undefined;
+    const bodyInner = body?.innerError || {};
+
+    const microsoftCorrelationIds = {
+      requestId: readHeader(headers, 'request-id') || readHeader(headers, 'x-ms-request-id') || error?.requestId || bodyInner['request-id'],
+      clientRequestId: readHeader(headers, 'client-request-id') || bodyInner['client-request-id'],
+      agsId: readHeader(headers, 'x-ms-ags-diagnostic'),
+      correlationId: readHeader(headers, 'x-ms-correlation-id'),
+      activityId: readHeader(headers, 'x-ms-activity-id')
+    };
+    if (bodyInner['request-id']) microsoftCorrelationIds.innerRequestId = bodyInner['request-id'];
+    const date = bodyInner['date'] || readHeader(headers, 'date');
+    if (date) microsoftCorrelationIds.date = date;
+
     const errorDetails = {
       timestamp: new Date().toISOString(),
       method,
       path,
+      url: url || path,
       clientRequestId,
-      statusCode: error.status || error.statusCode,
-      code: error.code,
-      message: error.message,
-      microsoftCorrelationIds: {},
+      statusCode,
+      code: body?.code || error?.code,
+      message: body?.message || error?.message,
+      microsoftCorrelationIds,
       retryAfter: this.extractRetryAfter(error),
       innerError: null
     };
 
-    // Extract Microsoft's correlation IDs from headers
-    if (error.headers) {
-      errorDetails.microsoftCorrelationIds = {
-        requestId: error.headers['request-id'] || error.headers['x-ms-request-id'],
-        clientRequestId: error.headers['client-request-id'],
-        agsId: error.headers['x-ms-ags-diagnostic'],
-        correlationId: error.headers['x-ms-correlation-id'],
-        activityId: error.headers['x-ms-activity-id']
-      };
-    }
-
     // Extract detailed error information from response body
-    if (error.body && error.body.error) {
-      const graphError = error.body.error;
+    if (body) {
       errorDetails.innerError = {
-        code: graphError.code,
-        message: graphError.message,
-        target: graphError.target,
-        details: graphError.details,
-        innerError: graphError.innerError
+        code: body.code,
+        message: body.message,
+        target: body.target,
+        details: body.details,
+        innerError: body.innerError
       };
-
-      // Extract additional correlation IDs from inner error
-      if (graphError.innerError) {
-        if (graphError.innerError['request-id']) {
-          errorDetails.microsoftCorrelationIds.innerRequestId = graphError.innerError['request-id'];
-        }
-        if (graphError.innerError['date']) {
-          errorDetails.microsoftCorrelationIds.date = graphError.innerError['date'];
-        }
-      }
     }
+
+    // Structured copy for callers (never contains the Authorization header or token).
+    // We always send our own client-request-id, so it stays known even when Graph does not echo it.
+    errorDetails.graphError = {
+      status: statusCode ?? null,
+      code: errorDetails.code || null,
+      message: errorDetails.message || null,
+      requestId: microsoftCorrelationIds.requestId || null,
+      clientRequestId: microsoftCorrelationIds.clientRequestId || clientRequestId || null,
+      date: date || null,
+      method: method || null,
+      url: errorDetails.url || null
+    };
 
     return errorDetails;
   }
@@ -189,8 +272,9 @@ export class GraphApiClient {
     let delay = authConfig.retry.initialDelay; // Start at exactly 1 second
 
     while (retryCount <= maxRetries) {
+      let request = null;
       try {
-        let request = this.client.api(path);
+        request = this.client.api(path);
 
         // Add correlation ID header
         request = request.header('client-request-id', clientRequestId);
@@ -219,6 +303,9 @@ export class GraphApiClient {
             startDateTime: options.startDateTime,
             endDateTime: options.endDateTime
           });
+        }
+        if (options.responseType) {
+          request = request.responseType(options.responseType);
         }
 
         // Log request attempt
@@ -258,7 +345,7 @@ export class GraphApiClient {
         this.activeRequests--;
         
         // Extract detailed error information including Microsoft's correlation IDs
-        const errorDetails = this.extractErrorDetails(error, clientRequestId, path, method);
+        const errorDetails = this.extractErrorDetails(error, clientRequestId, path, method, describeRequestUrl(request, path));
         
         // Handle rate limiting (429 responses)
         if (error.code === 'TooManyRequests' || error.status === 429) {
@@ -320,7 +407,7 @@ export class GraphApiClient {
         }
         
         // Log final error and return MCP error
-        console.error(`Graph API error: ${method} ${path} [correlation: ${clientRequestId}]`);
+        console.error(`Graph API error: ${method} ${errorDetails.url} [correlation: ${clientRequestId}]`);
         console.error('Error details:', safeStringify(errorDetails, 2));
         
         return this.handleGraphError(error, errorDetails);
@@ -352,87 +439,68 @@ export class GraphApiClient {
       const response = await this.client.api('/$batch').post(batchContent);
       return response.responses;
     } catch (error) {
-      return this.handleGraphError(error);
+      return this.handleGraphError(error, this.extractErrorDetails(error, null, '/$batch', 'POST'));
     }
   }
 
   handleGraphError(error, enhancedErrorDetails = null) {
-    // Use enhanced error details if provided, otherwise extract basic details
-    const errorDetails = enhancedErrorDetails || {
-      timestamp: new Date().toISOString(),
-      statusCode: error.status || error.statusCode,
-      code: error.code,
-      message: error.message,
-      microsoftCorrelationIds: {
-        requestId: error.headers?.['request-id'] || 'unknown'
-      }
-    };
+    // Use enhanced error details if provided, otherwise extract them from the error alone
+    const errorDetails = enhancedErrorDetails || this.extractErrorDetails(error);
 
     // Log comprehensive error details for debugging
     console.error('Graph API Error - Full Details:', safeStringify(errorDetails, 2));
 
-    // Create user-friendly error message with correlation IDs for support
-    let userMessage = '';
-    let supportInfo = '';
-
-    // Build support information with correlation IDs
     const correlationIds = errorDetails.microsoftCorrelationIds || {};
-    const supportCorrelationIds = Object.entries(correlationIds)
-      .filter(([key, value]) => value && value !== 'unknown')
-      .map(([key, value]) => `${key}: ${value}`)
-      .join(', ');
+    const graphError = errorDetails.graphError;
 
-    if (supportCorrelationIds) {
-      supportInfo = ` [Support reference: ${supportCorrelationIds}]`;
-    }
-
-    // Enhanced error messages for common scenarios
+    // Short human prefix; the verbatim Graph diagnostics follow it (see formatGraphErrorText)
+    let prefix = '';
     switch (errorDetails.statusCode) {
       case 400:
-        userMessage = 'Bad request. Please check the request parameters and format.';
+        prefix = 'Bad request.';
         break;
       case 401:
-        userMessage = 'Authentication failed. Please re-authenticate.';
+        prefix = 'Authentication failed. Please re-authenticate.';
         break;
       case 403:
-        userMessage = 'Insufficient permissions. Please check your app permissions in Azure AD.';
+        prefix = 'Insufficient permissions. Please check your app permissions in Azure AD.';
         break;
       case 404:
-        userMessage = 'Resource not found. The requested item may have been deleted or moved.';
+        prefix = 'Resource not found. The requested item may have been deleted or moved.';
         break;
       case 409:
-        userMessage = 'Conflict detected. This may be due to concurrent updates or scheduling conflicts.';
+        prefix = 'Conflict detected. This may be due to concurrent updates or scheduling conflicts.';
         break;
-      case 429:
+      case 429: {
         // Return specific rate limit error
         const retryAfterMs = this.extractRetryAfter(error) || 60000;
         return createRateLimitError(Math.ceil(retryAfterMs / 1000));
+      }
       case 500:
       case 502:
       case 503:
-      case 504:
-        return createServiceUnavailableError('Microsoft Graph API');
+      case 504: {
+        // Keep the retryable service-unavailable shape but do not drop what Graph said
+        const unavailable = createServiceUnavailableError('Microsoft Graph API');
+        unavailable.content[0].text += ` ${formatGraphErrorText(graphError)}`;
+        unavailable._errorDetails = { ...unavailable._errorDetails, graphError };
+        return unavailable;
+      }
       default:
-        if (error.code === 'InvalidAuthenticationToken') {
-          userMessage = 'Invalid or expired authentication token. Please re-authenticate.';
+        if (errorDetails.code === 'InvalidAuthenticationToken') {
+          prefix = 'Invalid or expired authentication token. Please re-authenticate.';
         } else {
-          userMessage = `Graph API error: ${errorDetails.message || 'Unknown error occurred'}`;
+          prefix = 'Graph API error.';
         }
     }
 
-    // Include specific error details if available
-    if (errorDetails.innerError && errorDetails.innerError.message) {
-      userMessage += ` Details: ${errorDetails.innerError.message}`;
-    }
-
-    // Append support information
-    userMessage += supportInfo;
-
     // Create error with additional properties for MCP error conversion
-    const finalError = new Error(userMessage);
+    const finalError = new Error(`${prefix} ${formatGraphErrorText(graphError)}`);
     finalError.originalError = error;
     finalError.correlationIds = correlationIds;
     finalError.statusCode = errorDetails.statusCode;
+    if (errorDetails.code) finalError.code = errorDetails.code;
+    finalError.graphError = graphError;
     finalError.retryable = this.isRetryableError(errorDetails.statusCode);
 
     return convertErrorToToolError(finalError, 'Microsoft Graph API');
@@ -466,6 +534,17 @@ export class GraphApiClient {
 
   async deleteWithRetry(path) {
     return this.makeRequest(path, {}, 'DELETE');
+  }
+
+  /**
+   * GET a resource as raw bytes (e.g. an attachment's /$value). Shares
+   * makeRequest's retry and error handling: resolves to a Buffer on success
+   * and to the same MCP error object makeRequest returns on failure.
+   */
+  async getBinary(path, options = {}) {
+    const result = await this.makeRequest(path, { ...options, responseType: ResponseType.ARRAYBUFFER }, 'GET');
+    if (result && result.isError !== undefined && result.content) return result;
+    return toBinaryBuffer(result);
   }
 
   // Pagination helper

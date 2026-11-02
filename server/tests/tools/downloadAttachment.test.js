@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { downloadAttachmentTool } from '../../tools/attachments/downloadAttachment.js';
+import { mockGraphErrorResult } from '../helpers/mockGraph.js';
 
 /**
  * Regression tests for large-attachment delivery: with includeContent the
@@ -14,10 +15,14 @@ import { downloadAttachmentTool } from '../../tools/attachments/downloadAttachme
 const PDF_BYTES = Buffer.from('%PDF-1.4 real invoice bytes for download test');
 const PDF_B64 = PDF_BYTES.toString('base64');
 
-function fileAttachmentMock({ contentBytes = PDF_B64, name = 'Invoice-001.pdf', contentType = 'application/pdf' } = {}) {
+// Mimics Graph: a $select narrows the returned fields (contentBytes only when
+// asked for), no $select returns the whole fileAttachment, and '@odata.type' is
+// not a selectable property (400).
+function fileAttachmentMock({ contentBytes = PDF_B64, name = 'Invoice-001.pdf', contentType = 'application/pdf', id = 'a1' } = {}) {
+  const expectedPath = `/me/messages/m1/attachments/${id}`;
   const meta = {
     '@odata.type': '#microsoft.graph.fileAttachment',
-    id: 'a1',
+    id,
     name,
     contentType,
     size: Buffer.from(contentBytes, 'base64').length,
@@ -25,13 +30,18 @@ function fileAttachmentMock({ contentBytes = PDF_B64, name = 'Invoice-001.pdf', 
     lastModifiedDateTime: '2026-08-29T15:48:33Z'
   };
   return vi.fn((reqPath, options = {}) => {
-    if (reqPath !== '/me/messages/m1/attachments/a1') {
+    if (reqPath !== expectedPath) {
       return Promise.reject(new Error(`unexpected path: ${reqPath}`));
     }
-    if ((options.select || '').includes('contentBytes')) {
-      return Promise.resolve({ ...meta, contentBytes });
+    if (options.select) {
+      if (options.select.includes('@odata.type')) {
+        return Promise.resolve(mockGraphErrorResult({
+          message: "Parsing OData Select and Expand failed: Term '@odata.type' is not valid in a $select or $expand expression."
+        }));
+      }
+      return Promise.resolve(options.select.includes('contentBytes') ? { ...meta, contentBytes } : meta);
     }
-    return Promise.resolve(meta);
+    return Promise.resolve({ ...meta, contentBytes });
   });
 }
 
@@ -56,11 +66,13 @@ describe('downloadAttachmentTool (file delivery)', () => {
     fs.rmSync(receiptsDir, { recursive: true, force: true });
   });
 
-  function auth(mock) {
+  let getBinary;
+  function auth(mock, binary = vi.fn()) {
     makeRequest = mock;
+    getBinary = binary;
     return {
       ensureAuthenticated: vi.fn().mockResolvedValue(true),
-      getGraphApiClient: vi.fn().mockReturnValue({ makeRequest: mock })
+      getGraphApiClient: vi.fn().mockReturnValue({ makeRequest: mock, getBinary: binary })
     };
   }
 
@@ -108,14 +120,118 @@ describe('downloadAttachmentTool (file delivery)', () => {
     expect(out.savedPath).toBe(path.join(receiptsDir, 'Invoice-001.pdf'));
   });
 
-  it('fetches content with the proven $select shape', async () => {
+  it('fetches the bytes without a $select and never selects @odata.type', async () => {
     authManager = auth(fileAttachmentMock());
 
-    await downloadAttachmentTool(authManager, {
+    const res = await downloadAttachmentTool(authManager, {
       messageId: 'm1', attachmentId: 'a1', saveToFile: true
     });
-    const contentFetch = makeRequest.mock.calls.find(c => (c[1]?.select || '').includes('contentBytes'));
-    expect(contentFetch[1].select).toBe('id,name,contentType,size,isInline,lastModifiedDateTime,contentBytes,@odata.type');
+    expect(res.isError).toBeUndefined();
+    expect(makeRequest).toHaveBeenCalledTimes(1);
+    expect(makeRequest.mock.calls[0][1]?.select).toBeUndefined();
+    expect(getBinary).not.toHaveBeenCalled();
+  });
+
+  it('metadata-only and inline requests never put @odata.type in a $select', async () => {
+    authManager = auth(fileAttachmentMock());
+
+    await downloadAttachmentTool(authManager, { messageId: 'm1', attachmentId: 'a1' });
+    await downloadAttachmentTool(authManager, { messageId: 'm1', attachmentId: 'a1', includeContent: true, decodeContent: false });
+    expect(makeRequest.mock.calls.length).toBeGreaterThanOrEqual(3);
+    for (const call of makeRequest.mock.calls) {
+      expect(call[1]?.select || '').not.toContain('@odata.type');
+    }
+  });
+
+  it.each([
+    ['a dash', 'AbCd-12Ef-34'],
+    ['an underscore mid-string', 'AbCd_12Ef_34'],
+    ['a trailing =', 'AbCd12Ef34gH='],
+    ['dash, underscore and trailing =', 'Ab-Cd_12Ef=']
+  ])('saves a real PDF for an attachment id with %s, passing the id through unchanged', async (_label, id) => {
+    authManager = auth(fileAttachmentMock({ id }));
+
+    const res = await downloadAttachmentTool(authManager, {
+      messageId: 'm1', attachmentId: id, saveToFile: true
+    });
+    expect(res.isError).toBeUndefined();
+    const out = JSON.parse(res.content[0].text);
+    const onDisk = fs.readFileSync(out.savedPath);
+    expect(onDisk.length).toBeGreaterThan(0);
+    expect(onDisk.subarray(0, 4).toString('latin1')).toBe('%PDF');
+    expect(onDisk).toEqual(PDF_BYTES);
+    expect(makeRequest.mock.calls.map(c => c[0])).toEqual([`/me/messages/m1/attachments/${id}`]);
+  });
+
+  it('falls back to /$value when the item endpoint fails, with identical bytes', async () => {
+    // Item route rejected (e.g. 400); the raw route delivers the same file.
+    const binary = vi.fn(async () => Buffer.from(PDF_BYTES));
+    const mock = vi.fn((reqPath, options = {}) => {
+      if (reqPath !== '/me/messages/m1/attachments/a1') return Promise.reject(new Error(`unexpected path: ${reqPath}`));
+      if (options.select) {
+        return Promise.resolve({
+          '@odata.type': '#microsoft.graph.fileAttachment', id: 'a1', name: 'Invoice-001.pdf',
+          contentType: 'application/pdf', size: PDF_BYTES.length, isInline: false
+        });
+      }
+      return Promise.resolve(mockGraphErrorResult({ message: 'The attachment could not be returned' }));
+    });
+    authManager = auth(mock, binary);
+
+    const res = await downloadAttachmentTool(authManager, {
+      messageId: 'm1', attachmentId: 'a1', saveToFile: true
+    });
+    expect(res.isError).toBeUndefined();
+    const out = JSON.parse(res.content[0].text);
+    expect(binary).toHaveBeenCalledWith('/me/messages/m1/attachments/a1/$value');
+    expect(fs.readFileSync(out.savedPath)).toEqual(PDF_BYTES);
+    expect(out.name).toBe('Invoice-001.pdf');
+  });
+
+  it('includeContent also uses the fallback and keeps the bytes intact', async () => {
+    const binary = vi.fn(async () => Buffer.from(PDF_BYTES));
+    const mock = vi.fn((reqPath, options = {}) => {
+      if (options.select) {
+        return Promise.resolve({
+          '@odata.type': '#microsoft.graph.fileAttachment', id: 'a1', name: 'Invoice-001.pdf',
+          contentType: 'application/pdf', size: PDF_BYTES.length, isInline: false
+        });
+      }
+      return Promise.resolve(mockGraphErrorResult({ status: 404, code: 'ErrorItemNotFound', message: 'not found' }));
+    });
+    authManager = auth(mock, binary);
+
+    const res = await downloadAttachmentTool(authManager, {
+      messageId: 'm1', attachmentId: 'a1', includeContent: true, decodeContent: false
+    });
+    const out = JSON.parse(res.content[0].text);
+    expect(out.contentIncluded).toBe(true);
+    expect(Buffer.from(out.contentBytes, 'base64')).toEqual(PDF_BYTES);
+  });
+
+  it('reports both routes verbatim, with fetchDetails, when neither delivers the bytes', async () => {
+    const binary = vi.fn(async () => mockGraphErrorResult({
+      status: 404, code: 'ErrorItemNotFound', message: 'The specified object was not found in the store.',
+      requestId: 'req-value-route', method: 'GET', url: 'https://graph.microsoft.com/v1.0/me/messages/m1/attachments/a1/$value'
+    }));
+    const mock = vi.fn(() => Promise.resolve(mockGraphErrorResult({
+      status: 400, code: 'BadRequest', message: 'Unable to read the attachment', requestId: 'req-json-route'
+    })));
+    authManager = auth(mock, binary);
+
+    const res = await downloadAttachmentTool(authManager, {
+      messageId: 'm1', attachmentId: 'a1', saveToFile: true
+    });
+    expect(res.isError).toBe(true);
+    const text = res.content[0].text;
+    expect(text).toContain('HTTP 400 BadRequest: Unable to read the attachment');
+    expect(text).toContain('request-id: req-json-route');
+    expect(text).toContain('HTTP 404 ErrorItemNotFound: The specified object was not found in the store.');
+    expect(text).toContain('request-id: req-value-route');
+    expect(res._errorDetails.fetchDetails).toMatchObject({
+      attemptedRoutes: ['json', 'value'], messageId: 'm1', attachmentId: 'a1'
+    });
+    expect(res._errorDetails.graphError).toMatchObject({ status: 404, code: 'ErrorItemNotFound' });
   });
 
   it('still returns small content inline when saveToFile is not requested', async () => {
@@ -173,5 +289,8 @@ describe('downloadAttachmentTool (file delivery)', () => {
     });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/file attachment/i);
+    expect(res._errorDetails.fetchDetails).toMatchObject({ messageId: 'm1', attachmentId: 'a1', attachmentName: 'embedded message' });
+    // A non-file attachment is final: the raw-bytes route is not tried
+    expect(getBinary).not.toHaveBeenCalled();
   });
 });

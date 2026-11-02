@@ -2,21 +2,23 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { saveAttachmentTool } from '../../tools/receipts/saveAttachment.js';
+import { saveAttachmentTool, saveAttachmentCore } from '../../tools/receipts/saveAttachment.js';
+import { mockGraphErrorResult } from '../helpers/mockGraph.js';
 
 const PDF_B64 = Buffer.from('%PDF-1.4 real invoice bytes').toString('base64');
 
 describe('saveAttachmentTool (FR-1)', () => {
-  let receiptsDir, makeRequest, authManager, savedEnv;
+  let receiptsDir, makeRequest, getBinary, authManager, savedEnv;
 
   beforeEach(() => {
     receiptsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'receipts-'));
     savedEnv = process.env.MCP_OUTLOOK_RECEIPTS_DIR;
     process.env.MCP_OUTLOOK_RECEIPTS_DIR = receiptsDir;
     makeRequest = vi.fn();
+    getBinary = vi.fn();
     authManager = {
       ensureAuthenticated: vi.fn().mockResolvedValue(true),
-      getGraphApiClient: vi.fn().mockReturnValue({ makeRequest })
+      getGraphApiClient: vi.fn().mockReturnValue({ makeRequest, getBinary })
     };
   });
 
@@ -258,10 +260,10 @@ describe('saveAttachmentTool (FR-1)', () => {
     }
   });
 
-  // Graph returns 400 for the attachment fetch when $select asks for
-  // contentBytes without the shape download_attachment uses. The content
-  // fetch must stay byte-identical to the proven-working download request.
-  it('fetches attachment content with the same $select shape download_attachment uses', async () => {
+  // Graph answers 400 BadRequest when a $select contains the '@odata.type'
+  // annotation, and returns that annotation on attachment items unasked. The
+  // content fetch therefore carries no $select at all.
+  it('fetches attachment content with no $select', async () => {
     makeRequest
       .mockResolvedValueOnce({ id: 'a9', name: 'Invoice.pdf', contentType: 'application/pdf', isInline: false, contentBytes: PDF_B64 });
 
@@ -272,7 +274,101 @@ describe('saveAttachmentTool (FR-1)', () => {
 
     const contentFetch = makeRequest.mock.calls.find(c => c[0] === '/me/messages/m1/attachments/a9');
     expect(contentFetch).toBeDefined();
-    expect(contentFetch[1].select).toBe('id,name,contentType,size,isInline,lastModifiedDateTime,contentBytes,@odata.type');
+    expect(contentFetch[1]?.select).toBeUndefined();
+    for (const call of makeRequest.mock.calls) {
+      expect(call[1]?.select || '').not.toContain('@odata.type');
+    }
+  });
+
+  it.each([
+    ['a dash', 'AbCd-12Ef-34'],
+    ['an underscore mid-string', 'AbCd_12Ef_34'],
+    ['a trailing =', 'AbCd12Ef34gH='],
+    ['dash, underscore and trailing =', 'Ab-Cd_12Ef=']
+  ])('saves a real PDF for an attachment id with %s, passing the id through unchanged', async (_label, id) => {
+    makeRequest.mockImplementation((reqPath, options = {}) => {
+      if (reqPath === `/me/messages/m1/attachments/${id}` && !options.select) {
+        return Promise.resolve({
+          '@odata.type': '#microsoft.graph.fileAttachment',
+          id, name: 'Invoice.pdf', contentType: 'application/pdf', isInline: false, contentBytes: PDF_B64
+        });
+      }
+      return Promise.reject(new Error(`unexpected request: ${reqPath} ${JSON.stringify(options)}`));
+    });
+
+    const res = await saveAttachmentTool(authManager, { messageId: 'm1', attachmentId: id, fileName: 'out.pdf' });
+    expect(res.isError).toBeUndefined();
+    const out = JSON.parse(res.content[0].text);
+    expect(out.attachmentId).toBe(id);
+    expect(out.attachmentName).toBe('Invoice.pdf');
+    const onDisk = fs.readFileSync(out.savedPath);
+    expect(onDisk.length).toBeGreaterThan(0);
+    expect(onDisk.subarray(0, 4).toString('latin1')).toBe('%PDF');
+    expect(onDisk.toString('base64')).toBe(PDF_B64);
+    expect(makeRequest.mock.calls.map(c => c[0])).toEqual([`/me/messages/m1/attachments/${id}`]);
+  });
+
+  it('falls back to /$value when the item endpoint fails, saving identical bytes', async () => {
+    const pdf = Buffer.from(PDF_B64, 'base64');
+    makeRequest.mockImplementation((reqPath, options = {}) => {
+      if (reqPath === '/me/messages/m1/attachments') {
+        return Promise.resolve({ value: [{ id: 'a1', name: 'Invoice.pdf', contentType: 'application/pdf', isInline: false }] });
+      }
+      if (options.select) {
+        return Promise.resolve({ '@odata.type': '#microsoft.graph.fileAttachment', id: 'a1', name: 'Invoice.pdf', contentType: 'application/pdf', isInline: false });
+      }
+      return Promise.resolve(mockGraphErrorResult({ message: 'The attachment could not be returned' }));
+    });
+    getBinary.mockResolvedValue(Buffer.from(pdf));
+
+    const res = await saveAttachmentTool(authManager, { messageId: 'm1', fileName: 'out.pdf' });
+    expect(res.isError).toBeUndefined();
+    const out = JSON.parse(res.content[0].text);
+    expect(getBinary).toHaveBeenCalledWith('/me/messages/m1/attachments/a1/$value');
+    expect(fs.readFileSync(out.savedPath)).toEqual(pdf);
+    expect(out.attachmentId).toBe('a1');
+    expect(out.attachmentName).toBe('Invoice.pdf');
+  });
+
+  it('throws an Error carrying fetchDetails when no route delivers the bytes', async () => {
+    makeRequest.mockImplementation((reqPath) => {
+      if (reqPath === '/me/messages/m1/attachments') {
+        return Promise.resolve({ value: [{ id: 'a1', name: 'Invoice.pdf', contentType: 'application/pdf', isInline: false }] });
+      }
+      return Promise.resolve(mockGraphErrorResult({ status: 400, code: 'BadRequest', message: 'Unable to read the attachment', requestId: 'req-json' }));
+    });
+    getBinary.mockResolvedValue(mockGraphErrorResult({ status: 404, code: 'ErrorItemNotFound', message: 'Not found in store', requestId: 'req-value' }));
+
+    const error = await saveAttachmentCore({ makeRequest, getBinary }, { messageId: 'm1', fileName: 'out.pdf' }, { vendorSenders: [] })
+      .then(() => null, e => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain('Unable to read the attachment');
+    expect(error.message).toContain('req-json');
+    expect(error.message).toContain('Not found in store');
+    expect(error.message).toContain('req-value');
+    expect(error.fetchDetails).toMatchObject({
+      attemptedRoutes: ['json', 'value'],
+      messageId: 'm1',
+      attachmentId: 'a1',
+      attachmentName: 'Invoice.pdf',
+      graphError: { status: 404, code: 'ErrorItemNotFound', requestId: 'req-value' }
+    });
+
+    // The tool wrapper keeps the structured details on the MCP error
+    const res = await saveAttachmentTool(authManager, { messageId: 'm1', fileName: 'out.pdf' });
+    expect(res.isError).toBe(true);
+    expect(res._errorDetails.fetchDetails.attemptedRoutes).toEqual(['json', 'value']);
+    expect(res._errorDetails.graphError).toMatchObject({ code: 'ErrorItemNotFound' });
+  });
+
+  it('rejects an item attachment with a clear error and does not try the raw route', async () => {
+    makeRequest.mockResolvedValueOnce({
+      '@odata.type': '#microsoft.graph.itemAttachment', id: 'a1', name: 'forwarded message', isInline: false
+    });
+    const res = await saveAttachmentTool(authManager, { messageId: 'm1', attachmentId: 'a1', fileName: 'out.pdf' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/not a file attachment/i);
+    expect(getBinary).not.toHaveBeenCalled();
   });
 
   it('response includes size, sha256, and absolute savedPath', async () => {

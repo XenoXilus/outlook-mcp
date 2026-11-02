@@ -118,6 +118,58 @@ describe('ErrorHandler', () => {
     });
   });
 
+  describe('Graph failure details', () => {
+    const graphError = {
+      status: 400,
+      code: 'BadRequest',
+      message: "Parsing OData Select and Expand failed: Term '@odata.type' is not valid in a $select or $expand expression.",
+      requestId: 'req-1111',
+      clientRequestId: 'client-2222',
+      date: '2026-01-15T10:00:00',
+      method: 'GET',
+      url: 'https://graph.microsoft.com/v1.0/me/messages/m1/attachments/a1?$select=id,name'
+    };
+
+    function rejected(status, overrides = {}) {
+      const error = new Error(graphError.message);
+      error.statusCode = status;
+      error.code = graphError.code;
+      error.graphError = { ...graphError, status, ...overrides };
+      return error;
+    }
+
+    it('classifies a 400 as a non-retryable client error', () => {
+      const classified = errorHandler.classifyError(rejected(400));
+      expect(classified.category).toBe('client_error');
+      expect(classified.retryable).toBe(false);
+    });
+
+    it.each([400, 403, 404, 409])('keeps status, code, message, request ids and METHOD url in the user message (%i)', (status) => {
+      const result = errorHandler.handleError(rejected(status), 'graph-operation');
+      const message = result.error.message;
+      expect(message).toContain(`HTTP ${status}`);
+      expect(message).toContain('BadRequest');
+      expect(message).toContain(graphError.message);
+      expect(message).toContain('request-id: req-1111');
+      expect(message).toContain('client-request-id: client-2222');
+      expect(message).toContain(`GET ${graphError.url}`);
+      expect(message).not.toContain('Please check your parameters');
+    });
+
+    it('exposes the structured graphError in the safe error details', () => {
+      const result = errorHandler.handleError(rejected(400), 'graph-operation');
+      expect(result.error.details.graphError).toEqual({ ...graphError, status: 400 });
+    });
+
+    it('leaves the generic message alone when no structured Graph error is attached', () => {
+      const error = new Error('Graph rejected it');
+      error.statusCode = 404;
+      const result = errorHandler.handleError(error, 'graph-operation');
+      expect(result.error.message).toBe('Invalid request. Please check your parameters.');
+      expect(result.error.details).not.toHaveProperty('graphError');
+    });
+  });
+
   describe('Retry Logic', () => {
     it('should determine if error is retryable', () => {
       const retryableError = new Error('Rate limited');
