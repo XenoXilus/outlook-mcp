@@ -9,7 +9,8 @@ import {
   sanitiseFilename,
   resolveDestination,
   isPdfBuffer,
-  saveReceiptFile
+  saveReceiptFile,
+  existingVersionPaths
 } from '../../utils/receiptFiles.js';
 
 const PDF = Buffer.from('%PDF-1.4 test content');
@@ -120,6 +121,29 @@ describe('receiptFiles', () => {
     expect(fs.readdirSync(receiptsDir)).toHaveLength(1);
   });
 
+  it('onExisting=skip reports identical bytes as skipped without existingDiffers', async () => {
+    await saveReceiptFile(PDF, receiptsDir, 'x.pdf');
+    const res = await saveReceiptFile(Buffer.from(PDF), receiptsDir, 'x.pdf');
+    expect(res.action).toBe('skipped');
+    expect(res.existingDiffers).toBeUndefined();
+  });
+
+  it('onExisting=skip never skips onto a file holding different bytes: it versions and flags existingDiffers', async () => {
+    await saveReceiptFile(PDF, receiptsDir, 'x.pdf');
+    const other = Buffer.from('%PDF-1.7 a different receipt');
+
+    const res = await saveReceiptFile(other, receiptsDir, 'x.pdf');
+    expect(res).toMatchObject({ action: 'versioned', existingDiffers: true });
+    expect(path.basename(res.savedPath)).toBe('x (2).pdf');
+    expect(fs.readFileSync(res.savedPath).equals(other)).toBe(true);
+    expect(fs.readFileSync(path.join(receiptsDir, 'x.pdf')).equals(PDF)).toBe(true); // untouched
+
+    // A re-run with the same bytes finds the earlier version instead of writing another.
+    const again = await saveReceiptFile(other, receiptsDir, 'x.pdf');
+    expect(again).toMatchObject({ action: 'skipped', existingDiffers: true, savedPath: res.savedPath });
+    expect(fs.readdirSync(receiptsDir).sort()).toEqual(['x (2).pdf', 'x.pdf']);
+  });
+
   it('onExisting=overwrite replaces the file', async () => {
     await saveReceiptFile(PDF, receiptsDir, 'x.pdf');
     const other = Buffer.from('%PDF-1.7 other');
@@ -133,6 +157,16 @@ describe('receiptFiles', () => {
     const res = await saveReceiptFile(PDF, receiptsDir, 'x.pdf', { onExisting: 'version' });
     expect(res.action).toBe('versioned');
     expect(path.basename(res.savedPath)).toBe('x (2).pdf');
+  });
+
+  it('lists a name and its existing numbered versions, stopping at the first gap', async () => {
+    expect(existingVersionPaths(receiptsDir, 'x.pdf')).toEqual([]);
+    fs.writeFileSync(path.join(receiptsDir, 'x.pdf'), PDF);
+    fs.writeFileSync(path.join(receiptsDir, 'x (2).pdf'), PDF);
+    fs.writeFileSync(path.join(receiptsDir, 'x (4).pdf'), PDF);
+    expect(existingVersionPaths(receiptsDir, 'x.pdf')).toEqual([
+      path.join(receiptsDir, 'x.pdf'), path.join(receiptsDir, 'x (2).pdf')
+    ]);
   });
 
   it('leaves no temp files behind', async () => {

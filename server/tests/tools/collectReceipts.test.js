@@ -49,6 +49,30 @@ function receiptMessage({ id, date, from, subject, html, attachments = [], conte
 
 const pdfAttachment = (id, name) => ({ id, name, contentType: 'application/pdf', isInline: false });
 
+/** A minimal one-page text PDF (one line per entry) that pdfjs can read. */
+function textPdf(lines) {
+  const esc = (s) => s.replace(/[\\()]/g, (c) => `\\${c}`);
+  const stream = ['BT', '/F1 12 Tf', '14 TL', '72 720 Td', ...lines.map(l => `(${esc(l)}) Tj T*`), 'ET'].join('\n');
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream`
+  ];
+  let out = '%PDF-1.4\n';
+  const offsets = [];
+  objects.forEach((body, i) => {
+    offsets.push(Buffer.byteLength(out, 'latin1'));
+    out += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(out, 'latin1');
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n` +
+    offsets.map(o => `${String(o).padStart(10, '0')} 00000 n \n`).join('');
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
+}
+
 /** Rough Graph $filter emulation: from eq / startswith(from) / contains(subject), OR-ed. */
 function graphSearch(messages) {
   return (filter) => messages.map(m => m.header).filter(h => {
@@ -621,7 +645,8 @@ describe('collectReceiptsTool (FR-6)', () => {
       const ambiguous = out.manifest.find(e => e.status === 'ambiguous');
       expect(ambiguous.candidates).toEqual(['Umbrella', 'Umbrella Ops']);
 
-      expect(out.summary).toEqual({ saved: 1, skipped: 0, not_found: 1, fetch_failed: 1, ambiguous: 1, duplicate: 0 });
+      expect(out.summary).toEqual({ saved: 1, skipped: 0, not_found: 1, fetch_failed: 1, ambiguous: 1, duplicate: 0, unmatched: 0 });
+      expect(out.unmatched).toEqual([]);
       expect(out.missing).toEqual(['Initech']); // only not_found vendors
       expect(out.failed.map(f => f.vendor)).toEqual(['Globex']);
       expect(out.notes).toEqual([]);
@@ -668,8 +693,11 @@ describe('collectReceiptsTool (FR-6)', () => {
       expect(path.basename(entry.renderedFallback.savedPath)).toBe('Acme 29Jun26 Invoice (rendered).pdf');
       expect(pdfFiles()).toEqual(['Acme 29Jun26 Invoice (rendered).pdf']); // never under the invoice name
 
+      expect(entry).toMatchObject({ method: 'rendered', isFormalInvoice: false, attemptedRoutes: ['json', 'value'] });
+
       expect(out.failed).toHaveLength(1);
       expect(out.failed[0].renderedFallback.savedPath).toBe(entry.renderedFallback.savedPath);
+      expect(out.failed[0]).toMatchObject({ method: 'rendered', isFormalInvoice: false, attemptedRoutes: ['json', 'value'] });
       expect(out.summary).toMatchObject({ fetch_failed: 1, saved: 0 });
     });
 
@@ -687,6 +715,8 @@ describe('collectReceiptsTool (FR-6)', () => {
       expect(out.manifest[0].status).toBe('fetch_failed');
       expect(out.manifest[0].renderedFallback).toBeUndefined();
       expect(out.manifest[0].renderedFallbackError).toContain('Chrome not available');
+      expect(out.manifest[0].method).toBeUndefined(); // nothing was saved
+      expect(out.manifest[0].attemptedRoutes).toEqual(['json', 'value']);
       expect(pdfFiles()).toEqual([]);
     });
 
@@ -862,6 +892,7 @@ describe('collectReceiptsTool (FR-6)', () => {
         // Found by all three searches, but each message is read once.
         for (const id of ['m-studio', 'm-gadget', 'm-support']) expect(extractCalls(id)).toBe(1);
         expect(out.notes).toContain('Acme Studio: 2 message(s) excluded by productContains/productExcludes');
+        expect(out.unmatched).toEqual([]);
       });
 
       it('gives a message to the rule whose productContains matched over a rule without product matchers', async () => {
@@ -1022,7 +1053,8 @@ describe('collectReceiptsTool (FR-6)', () => {
         productLabel: 'Studio plan - 3x; Gadget plan - Lite', invoiceNumber: 'ZQXV9876-0042'
       });
       expect(a.amounts).toEqual({
-        subtotal: 72, tax: 14.4, credits: null, total: 86.4, amountPaid: 86.4, currency: 'GBP', source: 'pdf'
+        subtotal: 72, tax: 14.4, credits: null, total: 86.4, amountPaid: 86.4, currency: 'GBP', source: 'pdf',
+        totalLabel: 'amount paid'
       });
       expect(a.amountMismatch).toBeUndefined();
       expect(a.currencyMismatch).toBeUndefined();
@@ -1057,7 +1089,7 @@ describe('collectReceiptsTool (FR-6)', () => {
       });
       const earlier = receiptMessage({
         id: 'm-earlier', date: '2026-06-10T09:00:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
-        html: '<p>Receipt number 5000-0001</p><p>Amount paid $42.00</p>',
+        html: '<p>Amount paid $42.00</p>', // no number, so nothing conflicts with the sha256 match
         attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: bytes }
       });
       vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -1082,7 +1114,8 @@ describe('collectReceiptsTool (FR-6)', () => {
       const msg = receiptMessage({
         id: 'm1', date: '2026-06-29T07:12:00Z', from: 'billing@acme.example', subject: 'Your Acme invoice',
         html: '<p>Amount paid £86.40</p>',
-        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: PDF_B64 }
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')],
+        content: { a1: fixturePdf('acme-invoice-uk.pdf').toString('base64') } // the same bytes as the file on disk
       });
 
       const out = await run([{ vendor: 'Acme', from: 'billing@acme.example' }], { messages: [msg] });
@@ -1093,5 +1126,331 @@ describe('collectReceiptsTool (FR-6)', () => {
       expect(out.summary).toMatchObject({ skipped: 1, saved: 0 });
       expect(fs.readFileSync(path.join(receiptsDir, 'Acme 29Jun26 Invoice.pdf'))).toEqual(fixturePdf('acme-invoice-uk.pdf'));
     }, 30000);
+
+    describe('file names and re-runs', () => {
+      const FROM = 'billing@acme.example';
+      const RULES = [{ vendor: 'Acme', from: FROM }];
+      const pdfFor = (number, amount) => textPdf([`Receipt number ${number}`, `Amount paid $${amount}.00`]);
+      const sameDay = (id, hour, number, amount) => receiptMessage({
+        id, date: `2026-06-10T${hour}:00:00Z`, from: FROM, subject: 'Your Acme receipt',
+        html: `<p>Receipt number ${number}</p><p>Amount paid $${amount}.00</p>`,
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')],
+        content: { a1: pdfFor(number, amount).toString('base64') }
+      });
+      const a = sameDay('m-a', '09', '7000-0001', 10);
+      const b = sameDay('m-b', '10', '7000-0002', 22);
+      const c = sameDay('m-c', '11', '7000-0003', 77);
+
+      it('keeps every same-day receipt with its own PDF and amounts when a re-run finds a new one', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {}); // pdfjs font warnings
+        const first = await run(RULES, { messages: [b, a] }); // Graph returns newest first
+        expect(first.manifest.map(e => e.status)).toEqual(['saved', 'saved']);
+
+        const second = await run(RULES, { messages: [c, b, a] });
+        vi.restoreAllMocks();
+
+        const entry = (id) => second.manifest.find(e => e.sourceMessageId === id);
+        expect(entry('m-c')).toMatchObject({ status: 'saved', amount: 77, amountSource: 'pdf', receiptNumber: '7000-0003' });
+        expect(entry('m-b')).toMatchObject({ status: 'skipped', amount: 22, amountSource: 'pdf' });
+        expect(entry('m-a')).toMatchObject({ status: 'skipped', amount: 10, amountSource: 'pdf' });
+        for (const [message, number, amount] of [[c, '7000-0003', 77], [b, '7000-0002', 22], [a, '7000-0001', 10]]) {
+          const saved = entry(message.header.id);
+          expect(path.basename(saved.savedPath)).toBe(`Acme 10Jun26 Invoice ${number}.pdf`);
+          expect(fs.readFileSync(saved.savedPath)).toEqual(pdfFor(number, amount));
+        }
+        expect(second.summary).toMatchObject({ saved: 1, skipped: 2, duplicate: 0 });
+        expect(pdfFiles().sort()).toEqual([
+          'Acme 10Jun26 Invoice 7000-0001.pdf', 'Acme 10Jun26 Invoice 7000-0002.pdf', 'Acme 10Jun26 Invoice 7000-0003.pdf'
+        ]);
+      }, 30000);
+
+      it('falls back to an ordinal suffix only for same-day receipts without any number', async () => {
+        const plain = (id, hour, html) => receiptMessage({
+          id, date: `2026-06-10T${hour}:00:00Z`, from: FROM, subject: 'Your Acme receipt', html
+        });
+        const out = await run(RULES, {
+          messages: [
+            plain('m-x', '11', '<p>Amount paid $5.00</p>'),
+            plain('m-y', '10', '<p>Amount paid $6.00</p>'),
+            plain('m-z', '09', '<p>Receipt number 7100-0001</p><p>Amount paid $7.00</p>')
+          ],
+          deps: { renderImpl: renderPdf() }
+        });
+
+        const name = (id) => path.basename(out.manifest.find(e => e.sourceMessageId === id).savedPath);
+        expect(name('m-x')).toBe('Acme 10Jun26 Invoice.pdf');
+        expect(name('m-y')).toBe('Acme 10Jun26 Invoice (2).pdf');
+        expect(name('m-z')).toBe('Acme 10Jun26 Invoice 7100-0001.pdf');
+      });
+
+      it('never reports a different file under the name as skipped: the receipt is versioned and flagged', async () => {
+        fs.writeFileSync(path.join(receiptsDir, 'Acme 29Jun26 Invoice.pdf'), fixturePdf('acme-invoice-uk.pdf'));
+        const msg = receiptMessage({
+          id: 'm1', date: '2026-06-29T07:12:00Z', from: FROM, subject: 'Your Acme receipt',
+          html: '<p>Amount paid $77.00</p>',
+          attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')],
+          content: { a1: pdfFor('7000-0009', 77).toString('base64') }
+        });
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        const out = await run(RULES, { messages: [msg] });
+        vi.restoreAllMocks();
+
+        expect(out.manifest[0]).toMatchObject({
+          status: 'saved', action: 'versioned', existingDiffers: true, amount: 77, currency: 'USD', amountSource: 'pdf'
+        });
+        expect(path.basename(out.manifest[0].savedPath)).toBe('Acme 29Jun26 Invoice (2).pdf');
+        expect(fs.readFileSync(path.join(receiptsDir, 'Acme 29Jun26 Invoice.pdf'))).toEqual(fixturePdf('acme-invoice-uk.pdf'));
+      }, 30000);
+
+      it('skips an earlier rendering of the same email on re-run even though the render timestamps differ', async () => {
+        let stamp = 0;
+        const renderImpl = vi.fn().mockImplementation(async () => {
+          stamp++;
+          return Buffer.from(`%PDF-1.4\n/CreationDate (D:2026060112000${stamp}+00'00')\n/ModDate (D:2026060112000${stamp}+00'00')\nbody`);
+        });
+        const msg = receiptMessage({
+          id: 'm1', date: '2026-06-10T09:00:00Z', from: FROM, subject: 'Your Acme receipt', html: '<p>Amount paid $5.00</p>'
+        });
+
+        await run(RULES, { messages: [msg], deps: { renderImpl } });
+        const second = await run(RULES, { messages: [msg], deps: { renderImpl } });
+
+        expect(renderImpl).toHaveBeenCalledTimes(2);
+        expect(second.manifest[0]).toMatchObject({ status: 'skipped', method: 'rendered' });
+        expect(pdfFiles()).toEqual(['Acme 10Jun26 Invoice.pdf']);
+      });
+    });
+
+    it('keeps receipts with different numbers apart even when their PDF bytes are identical', async () => {
+      const bytes = Buffer.from('%PDF-1.4 shared template bytes').toString('base64');
+      const numbered = (id, day, number, amount) => receiptMessage({
+        id, date: `2026-06-${day}T09:00:00Z`, from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: `<p>Receipt number ${number}</p><p>Amount paid $${amount}.00</p>`,
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: bytes }
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const out = await run([{ vendor: 'Acme', from: 'billing@acme.example' }], {
+        messages: [numbered('m-2222', '20', '2222', 35), numbered('m-1111', '10', '1111', 20)]
+      });
+      vi.restoreAllMocks();
+
+      const entry = (id) => out.manifest.find(e => e.sourceMessageId === id);
+      expect(entry('m-2222')).toMatchObject({ status: 'saved', receiptNumber: '2222', amount: 35 });
+      expect(entry('m-1111')).toMatchObject({ status: 'saved', receiptNumber: '1111', amount: 20, sameFileAs: 'm-2222' });
+      expect(fs.existsSync(entry('m-1111').savedPath)).toBe(true);
+      expect(out.summary.duplicate).toBe(0);
+    });
+
+    describe('grouping copies by number', () => {
+      const FROM = 'billing@acme.example';
+      const RULES = [{ vendor: 'Acme', from: FROM }];
+      const mail = (id, day, html, subject = 'Your Acme receipt') => receiptMessage({
+        id, date: `2026-06-${day}T09:00:00Z`, from: FROM, subject, html
+      });
+
+      it('never merges charges that share an order number when their totals differ', async () => {
+        const out = await run(RULES, {
+          messages: [
+            mail('m-35', '12', '<p>Order #5555</p><p>Amount paid $35.00</p>'),
+            mail('m-20', '11', '<p>Order #5555</p><p>Amount paid $20.00</p>')
+          ],
+          deps: { renderImpl: renderPdf() }
+        });
+
+        expect(out.manifest.map(e => [e.sourceMessageId, e.status, e.amount]))
+          .toEqual([['m-35', 'saved', 35], ['m-20', 'saved', 20]]);
+        expect(out.manifest.filter(e => e.numberConflict)).toEqual([]);
+      });
+
+      it('groups copies sharing any receipt, invoice or order number', async () => {
+        const out = await run(RULES, {
+          messages: [
+            mail('m-fw', '11', '<p>FYI</p><p>Invoice number INV-6001</p><p>Amount paid $20.00</p>', 'Fw: Your Acme receipt'),
+            mail('m-orig', '10', '<p>Receipt number 6000-0001</p><p>Invoice number INV-6001</p><p>Amount paid $20.00</p>')
+          ],
+          deps: { renderImpl: renderPdf() }
+        });
+
+        const entry = (id) => out.manifest.find(e => e.sourceMessageId === id);
+        expect(entry('m-orig')).toMatchObject({ status: 'saved', receiptNumber: '6000-0001' });
+        expect(entry('m-fw')).toMatchObject({
+          status: 'duplicate', duplicate_of: 'invoiceNumber:INV-6001', duplicateOfMessageId: 'm-orig'
+        });
+      });
+
+      it('keeps receipts sharing a receipt number apart when their totals differ, noting the conflict on both', async () => {
+        const out = await run(RULES, {
+          messages: [
+            mail('m-35', '12', '<p>Receipt number 7000-0001</p><p>Amount paid $35.00</p>'),
+            mail('m-20', '11', '<p>Receipt number 7000-0001</p><p>Amount paid $20.00</p>')
+          ],
+          deps: { renderImpl: renderPdf() }
+        });
+
+        expect(out.manifest.map(e => e.status)).toEqual(['saved', 'saved']);
+        const entry = (id) => out.manifest.find(e => e.sourceMessageId === id);
+        expect(entry('m-35').numberConflict).toMatch(/receiptNumber 7000-0001.*m-20/);
+        expect(entry('m-20').numberConflict).toMatch(/receiptNumber 7000-0001.*m-35/);
+      });
+    });
+
+    describe('PDF totals versus email totals', () => {
+      const msg = (html = '<p>Amount paid $42.00</p>') => receiptMessage({
+        id: 'm1', date: '2026-06-29T07:12:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt', html,
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: PDF_B64 }
+      });
+      const parsed = (amounts, extra = {}) => vi.fn().mockResolvedValue({
+        amounts: { subtotal: null, tax: null, credits: null, amountPaid: null, currency: 'USD', source: 'pdf', ...amounts },
+        lineItems: [], productLabel: null, invoiceNumber: null, receiptNumber: null, ...extra
+      });
+      const RULES = [{ vendor: 'Acme', from: 'billing@acme.example' }];
+
+      it('keeps a labelled email total over a guessed (unlabelled) PDF total', async () => {
+        const out = await run(RULES, { messages: [msg()], deps: { parsePdf: parsed({ total: 99, totalLabel: null }) } });
+        expect(out.manifest[0]).toMatchObject({
+          status: 'saved', amount: 42, currency: 'USD', amountSource: 'body', pdfTotalGuessed: true,
+          amountMismatch: { body: 42, pdf: 99 }
+        });
+        expect(out.manifest[0].amounts.source).toBe('body');
+      });
+
+      it('keeps the email total when the real PDF parser finds only an unlabelled figure', async () => {
+        const unlabelled = receiptMessage({
+          id: 'm1', date: '2026-06-29T07:12:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+          html: '<p>Amount paid $42.00</p>', attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')],
+          content: { a1: textPdf(['Thank you for your business', 'Reference $12.00']).toString('base64') }
+        });
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const out = await run(RULES, { messages: [unlabelled] });
+        vi.restoreAllMocks();
+        expect(out.manifest[0]).toMatchObject({ amount: 42, amountSource: 'body', pdfTotalGuessed: true });
+      }, 30000);
+
+      it('prefers a labelled PDF total', async () => {
+        const out = await run(RULES, { messages: [msg()], deps: { parsePdf: parsed({ total: 99, totalLabel: 'total' }) } });
+        expect(out.manifest[0]).toMatchObject({ amount: 99, amountSource: 'pdf', amountMismatch: { body: 42, pdf: 99 } });
+        expect(out.manifest[0].pdfTotalGuessed).toBeUndefined();
+      });
+
+      it('uses a guessed PDF total, flagged, only when the email has none', async () => {
+        const out = await run(RULES, {
+          messages: [msg('<p>Thanks for your order</p>')], deps: { parsePdf: parsed({ total: 99, totalLabel: null }) }
+        });
+        expect(out.manifest[0]).toMatchObject({ amount: 99, amountSource: 'pdf', pdfTotalGuessed: true });
+      });
+
+      it('caps receipt and invoice numbers read from the PDF at 300 characters', async () => {
+        const out = await run(RULES, {
+          messages: [msg()],
+          deps: { parsePdf: parsed({ total: 42, totalLabel: 'amount paid' }, { receiptNumber: 'R'.repeat(500), invoiceNumber: 'I'.repeat(400) }) }
+        });
+        expect(out.manifest[0].receiptNumber.startsWith('R'.repeat(300))).toBe(true);
+        expect(out.manifest[0].receiptNumber.length).toBe(301); // 300 + ellipsis, as the parser caps
+        expect(out.manifest[0].invoiceNumber.length).toBe(301);
+      });
+    });
+
+    describe('product from the PDF and unmatched messages', () => {
+      const FROM = 'billing@acme.example';
+      const pdfOnly = (content) => receiptMessage({
+        id: 'm1', date: '2026-06-29T09:00:00Z', from: FROM, subject: 'Your Acme invoice',
+        html: '<p>Amount paid £86.40</p>', attachments: [pdfAttachment('a1', 'Invoice-0042.pdf')], content: { a1: content }
+      });
+      const SPLIT = [
+        { vendor: 'Acme Studio', from: FROM, productContains: 'studio' },
+        { vendor: 'Acme Other', from: FROM, productExcludes: 'studio' }
+      ];
+
+      it('reads the product from the PDF attachment before claiming when the email names none', async () => {
+        const out = await run(SPLIT, { messages: [pdfOnly(fixturePdf('acme-invoice-uk.pdf').toString('base64'))] });
+
+        const owned = out.manifest.filter(e => e.sourceMessageId === 'm1');
+        expect(owned).toHaveLength(1);
+        expect(owned[0]).toMatchObject({
+          vendor: 'Acme Studio', status: 'saved', productLabel: 'Studio plan - 3x; Gadget plan - Lite', productSource: 'pdf'
+        });
+        expect(owned[0].matchedBy).toEqual(['from', 'product:contains:studio']);
+        expect(out.manifest.find(e => e.vendor === 'Acme Other')).toEqual({ vendor: 'Acme Other', status: 'not_found', excludedByProduct: 1 });
+        expect(out.unmatched).toEqual([]);
+      }, 30000);
+
+      it('stays ambiguous, with a note, when the PDF cannot be read for its product', async () => {
+        const out = await run(SPLIT, { messages: [pdfOnly(graphFailure(500, 'InternalServerError', 'boom'))] });
+
+        expect(out.manifest).toHaveLength(1);
+        expect(out.manifest[0]).toMatchObject({ status: 'ambiguous', candidates: ['Acme Studio', 'Acme Other'] });
+        expect(out.manifest[0].reason).toMatch(/product could not be determined/);
+        expect(out.manifest[0].pdfProductError).toContain('Could not fetch the content of attachment');
+      });
+
+      it('lists messages every claiming rule rejected by product in unmatched[] and counts them', async () => {
+        const item = (id, day, product, subject = 'Your Acme receipt') => receiptMessage({
+          id, date: `2026-06-${day}T09:00:00Z`, from: FROM, subject,
+          html: `<table><tr><td>${product}</td><td>$12.00</td></tr></table><p>Total $12.00</p>`
+        });
+        const longSubject = `Your Acme receipt ${'x'.repeat(400)}`;
+
+        const out = await run([{ vendor: 'Acme Studio', from: FROM, productContains: 'studio' }], {
+          messages: [item('m-studio', '20', 'Studio plan - 3x'), item('m-gadget', '15', 'Gadget kit - Lite', longSubject)],
+          deps: { renderImpl: renderPdf() }
+        });
+
+        expect(out.manifest.map(e => e.sourceMessageId)).toEqual(['m-studio']);
+        expect(out.unmatched).toHaveLength(1);
+        expect(out.unmatched[0]).toMatchObject({
+          messageId: 'm-gadget', date: '2026-06-15T09:00:00Z', sender: FROM,
+          productLabel: 'Gadget kit - Lite', rejectedBy: ['Acme Studio']
+        });
+        expect(out.unmatched[0].subject.startsWith('Your Acme receipt xxx')).toBe(true);
+        expect(out.unmatched[0].subject.length).toBeLessThanOrEqual(301);
+        expect(out.summary.unmatched).toBe(1);
+      });
+    });
+
+    describe('input validation before any Graph call', () => {
+      const msg = receiptMessage({
+        id: 'm1', date: '2026-06-29T07:12:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Amount paid £42.00</p>', attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: PDF_B64 }
+      });
+      const call = (args) => {
+        makeRequest.mockImplementation(mailboxRouter({ messages: [msg] }));
+        return collectReceiptsTool(authManager, {
+          ...PERIOD, vendors: [{ vendor: 'Acme', from: 'billing@acme.example' }], ...args
+        }, { renderImpl: renderPdf() });
+      };
+
+      it('rejects a destDir outside the allowed roots, not a string, or not a directory', async () => {
+        const notADir = path.join(receiptsDir, 'not-a-dir');
+        fs.writeFileSync(notADir, 'x');
+        for (const destDir of ['/etc', 42, notADir]) {
+          const res = await call({ destDir });
+          expect(res.isError).toBe(true);
+          expect(res.content[0].text).toMatch(/destDir/);
+        }
+        expect(makeRequest).not.toHaveBeenCalled();
+        expect(pdfFiles()).toEqual([]);
+      });
+
+      it('rejects malformed rule fields and onExisting', async () => {
+        for (const args of [
+          { vendors: [{ vendor: 'Acme', from: 'billing@acme.example', expectedCurrency: 5 }] },
+          { vendors: [{ vendor: 7, from: 'billing@acme.example' }] },
+          { vendors: [{ vendor: 'Acme', from: 42 }] },
+          { vendors: [{ vendor: 'Acme', subjectContains: ['receipt'] }] },
+          { vendors: [{ vendor: 'Acme', from: 'billing@acme.example', filenameTemplate: 3 }] },
+          { vendors: [{ vendor: 'Acme', from: 'billing@acme.example', prefer: 'newest' }] },
+          { vendors: ['Acme'] },
+          { onExisting: 'replace' }
+        ]) {
+          const res = await call(args);
+          expect(res.isError).toBe(true);
+          expect(res.content[0].text).toMatch(/Invalid parameter '(vendors|onExisting)'/);
+        }
+        expect(makeRequest).not.toHaveBeenCalled();
+        expect(pdfFiles()).toEqual([]);
+      });
+    });
   });
 });

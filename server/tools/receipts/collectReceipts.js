@@ -7,19 +7,25 @@
  * several rule searches is processed once.
  *
  * Claiming: every rule is evaluated against every discovered message (sender,
- * normalised subject, optional productContains/productExcludes). A message
- * claimed by one rule belongs to it; a positive productContains match beats a
- * rule without product matchers; anything still contested, or whose product
- * cannot be determined for a rule that needs it, becomes an `ambiguous` entry.
+ * normalised subject, optional productContains/productExcludes). When the email
+ * body names no product and a rule needs one, the product is read from the PDF
+ * attachment. A message claimed by one rule belongs to it; a positive
+ * productContains match beats a rule without product matchers; anything still
+ * contested, or whose product cannot be determined for a rule that needs it,
+ * becomes an `ambiguous` entry. A message every claiming rule rejects by product
+ * is listed in unmatched[].
  *
- * Saving: copies of one receipt (same receipt/invoice/order number) collapse to
- * one representative and the rest are `duplicate`. The representative's PDF
- * comes from its attachment, else a per-receipt allowlisted link, else a
- * rendering of the email. A formal source that fails is `fetch_failed` (also
- * listed in failed[]) and gets a rendered copy that is never presented as the
- * invoice. Amounts prefer the saved PDF's text over the email body.
+ * Saving: copies of one receipt (sharing a receipt, invoice or order number and
+ * never disagreeing on a known total) collapse to one representative and the
+ * rest are `duplicate`. The representative's PDF comes from its attachment,
+ * else a per-receipt allowlisted link, else a rendering of the email. Names that
+ * collide within the run carry the receipt's own number. A formal source that
+ * fails is `fetch_failed` (also listed in failed[]) and gets a rendered copy that
+ * is never presented as the invoice. Amounts prefer the saved PDF's labelled
+ * total over the email body.
  *
- * Idempotent under re-runs (onExisting); one structured log line per outcome.
+ * Idempotent under re-runs (onExisting: 'skip' only skips a file holding the
+ * same bytes); one structured log line per outcome.
  */
 
 import fs from 'fs';
@@ -27,17 +33,33 @@ import path from 'path';
 import { convertErrorToToolError, createValidationError } from '../../utils/mcpErrorResponse.js';
 import { createSafeResponse } from '../../utils/jsonUtils.js';
 import { getMailboxBase, toStartDateTime, endDateFilterClause } from '../../graph/graphHelpers.js';
-import { getFilenameTemplate, renderFilenameTemplate } from '../../utils/receiptFiles.js';
+import {
+  getFilenameTemplate,
+  renderFilenameTemplate,
+  resolveDestination,
+  sanitiseFilename,
+  existingVersionPaths,
+  sha256Hex
+} from '../../utils/receiptFiles.js';
+import { fetchAttachmentContent } from '../../graph/attachmentContent.js';
 import { loadReceiptRules } from './receiptRules.js';
 import { extractReceiptCore } from './extractReceipt.js';
 import { saveAttachmentCore } from './saveAttachment.js';
 import { fetchBillingPdfCore } from './fetchBillingPdf.js';
 import { renderEmailPdfCore } from './renderEmailPdf.js';
+import { renderHtmlToPdfBuffer } from './htmlToPdf.js';
 import { parseReceiptPdf } from './receiptPdfText.js';
 import { normaliseSubject, selectPdfAttachment } from './receiptParser.js';
 
 const STATUSES = ['saved', 'skipped', 'not_found', 'fetch_failed', 'ambiguous', 'duplicate'];
 const MESSAGE_SELECT = 'id,subject,from,receivedDateTime,hasAttachments,parentFolderId';
+const ATTACHMENT_LIST_SELECT = 'id,name,contentType,size,isInline';
+const ON_EXISTING = ['skip', 'overwrite', 'version'];
+const PREFER = ['invoice', 'receipt', 'first'];
+// Optional rule fields that must be strings when given.
+const STRING_RULE_FIELDS = ['from', 'subjectContains', 'filenameTemplate', 'expectedCurrency'];
+// Same cap as the parser applies to every extracted string.
+const STRING_CAP = 300;
 // Well-known folders whose messages are the user's own mail, never a vendor's.
 const EXCLUDED_FOLDERS = ['sentitems', 'drafts'];
 const NUMBER_KINDS = ['receiptNumber', 'invoiceNumber', 'orderNumber'];
@@ -68,10 +90,17 @@ function logCollectEvent(event) {
   console.error(`receipt-collect ${JSON.stringify(event)}`);
 }
 
+function capStr(value) {
+  if (typeof value !== 'string' || value.length <= STRING_CAP) return value;
+  return `${value.slice(0, STRING_CAP)}…`;
+}
+
 // Deterministic in-run dedup: 2nd same-named file becomes "name (2).pdf" etc.
+// Names are compared case-insensitively, as most receipt folders' file systems do.
 function dedupeFilename(fileName, usedNames) {
-  const count = usedNames.get(fileName) || 0;
-  usedNames.set(fileName, count + 1);
+  const key = fileName.toLowerCase();
+  const count = usedNames.get(key) || 0;
+  usedNames.set(key, count + 1);
   if (count === 0) return fileName;
   const ext = path.extname(fileName);
   const base = ext ? fileName.slice(0, -ext.length) : fileName;
@@ -82,6 +111,12 @@ function withSuffix(fileName, suffix) {
   const ext = path.extname(fileName);
   const base = ext ? fileName.slice(0, -ext.length) : fileName;
   return `${base}${suffix}${ext}`;
+}
+
+/** A receipt/invoice/order number reduced to characters safe in any file name ('' when none). */
+function fileNameToken(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40);
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?/;
@@ -111,6 +146,47 @@ function productTermsError(value) {
   const terms = Array.isArray(value) ? value : [value];
   if (terms.length === 0 || terms.some(t => typeof t !== 'string' || !t.trim())) {
     return 'must be a non-empty string or an array of non-empty strings';
+  }
+  return null;
+}
+
+/** Validation message for a malformed vendor rule, or null. Runs before any Graph call or file write. */
+function ruleError(rule, periodStart) {
+  if (!rule || typeof rule !== 'object' || Array.isArray(rule)) return 'each rule must be an object';
+  if (typeof rule.vendor !== 'string' || !rule.vendor.trim()) return 'each rule needs a vendor name (a non-empty string)';
+  const name = `Rule '${rule.vendor}'`;
+  for (const field of STRING_RULE_FIELDS) {
+    if (rule[field] !== undefined && rule[field] !== null && typeof rule[field] !== 'string') {
+      return `${name}: ${field} must be a string`;
+    }
+  }
+  if (!rule.from && !rule.subjectContains) return `${name} needs a from and/or subjectContains matcher`;
+  if (rule.prefer !== undefined && rule.prefer !== null && !PREFER.includes(rule.prefer)) {
+    return `${name}: prefer must be one of ${PREFER.join(', ')}`;
+  }
+  for (const field of ['productContains', 'productExcludes']) {
+    const problem = productTermsError(rule[field]);
+    if (problem) return `${name}: ${field} ${problem}`;
+  }
+  if (rule.filenameTemplate) {
+    try {
+      sanitiseFilename(renderFilenameTemplate(rule.filenameTemplate, { vendor: rule.vendor, date: periodStart }));
+    } catch (error) {
+      return `${name}: filenameTemplate does not give a usable file name (${error.message})`;
+    }
+  }
+  return null;
+}
+
+/** Validation message for destDir (same containment rules as every save), or null. */
+function destDirError(destDir) {
+  if (destDir === undefined || destDir === null) return null;
+  if (typeof destDir !== 'string') return 'must be a directory path string';
+  try {
+    const { dir } = resolveDestination(destDir, 'receipt.pdf');
+    if (fs.existsSync(dir) && !fs.statSync(dir).isDirectory()) return `is not a directory: ${dir}`;
+  } catch (error) {
+    return error.message;
   }
   return null;
 }
@@ -186,13 +262,128 @@ function resolveClaims(claims, vendorOf) {
   };
 }
 
-/** The number that identifies a receipt across copies: receipt, else invoice, else order number. */
-function dedupeKey(receipt) {
+/** A receipt's receipt/invoice/order numbers, trimmed and lower-cased, by kind. */
+function numbersOf(receipt) {
+  const numbers = {};
   for (const kind of NUMBER_KINDS) {
-    const value = typeof receipt[kind] === 'string' ? receipt[kind].trim() : '';
-    if (value) return { kind, value };
+    const value = typeof receipt?.[kind] === 'string' ? receipt[kind].trim().toLowerCase() : '';
+    if (value) numbers[kind] = value;
   }
-  return null;
+  return numbers;
+}
+
+/** True when both carry a number of the same kind and the numbers differ. */
+function numbersConflict(a, b) {
+  const x = numbersOf(a);
+  const y = numbersOf(b);
+  return NUMBER_KINDS.some(kind => x[kind] && y[kind] && x[kind] !== y[kind]);
+}
+
+/** True when two known totals cannot belong to the same charge. */
+function totalsDiffer(a, b) {
+  if (typeof a.amount !== 'number' || typeof b.amount !== 'number') return false;
+  if (Math.abs(a.amount - b.amount) > 0.005) return true;
+  return Boolean(a.currency && b.currency && a.currency !== b.currency);
+}
+
+function formatTotal(receipt) {
+  return [receipt.amount, receipt.currency].filter(v => v !== null && v !== undefined).join(' ');
+}
+
+/**
+ * Group copies of one receipt within each rule: members share a receipt,
+ * invoice or order number and never disagree on a known total (two charges on
+ * one order are two receipts). A receipt number shared by different totals
+ * leaves a numberConflict note on both sides.
+ */
+function groupCopies(owned) {
+  const groups = [];
+  const noteConflict = (item, other) => {
+    const number = item.receipt.receiptNumber.trim();
+    item.numberConflicts.push(
+      `receiptNumber ${number} is also on message ${other.message.id} with a different total ` +
+      `(${formatTotal(other.receipt)} vs ${formatTotal(item.receipt)}); kept as separate receipts`
+    );
+  };
+  for (const item of owned) {
+    item.numbers = numbersOf(item.receipt);
+    item.numberConflicts = item.numberConflicts || [];
+    let home = null;
+    for (const group of [...groups]) {
+      if (group.ruleIndex !== item.ruleIndex) continue;
+      const shares = NUMBER_KINDS.some(kind =>
+        item.numbers[kind] && group.members.some(m => m.numbers[kind] === item.numbers[kind]));
+      if (!shares) continue;
+      const clashing = group.members.filter(m => totalsDiffer(m.receipt, item.receipt));
+      if (clashing.length > 0) {
+        for (const other of clashing) {
+          if (!item.numbers.receiptNumber || other.numbers.receiptNumber !== item.numbers.receiptNumber) continue;
+          noteConflict(item, other);
+          noteConflict(other, item);
+        }
+        continue;
+      }
+      if (!home) {
+        home = group;
+        group.members.push(item);
+        continue;
+      }
+      // The item links two groups: merge them unless their known totals disagree.
+      if (group.members.some(m => home.members.some(h => totalsDiffer(m.receipt, h.receipt)))) continue;
+      home.members.push(...group.members);
+      groups.splice(groups.indexOf(group), 1);
+    }
+    if (!home) groups.push({ ruleIndex: item.ruleIndex, members: [item] });
+  }
+  return groups;
+}
+
+/** duplicate_of label: the number linking a copy to its representative (receipt, else invoice, else order). */
+function duplicateLabel(item, representative) {
+  const kind = NUMBER_KINDS.find(k => item.numbers[k] && item.numbers[k] === representative.numbers[k]) ||
+    NUMBER_KINDS.find(k => representative.numbers[k]);
+  return `${kind}:${representative.receipt[kind].trim()}`;
+}
+
+/**
+ * One file name per representative, from the rule's template. Receipts whose
+ * names collide in this run (one vendor, one day) are told apart by their own
+ * receipt/invoice/order number (the first kind unique among them), so a re-run
+ * maps each receipt to the same file whatever else arrived meanwhile; an
+ * ordinal "(2)" is the last resort for receipts that carry no number.
+ */
+function assignFileNames(representatives, vendors, usedNames) {
+  const names = new Map();
+  const byName = new Map();
+  for (const item of representatives) {
+    const rule = vendors[item.ruleIndex];
+    try {
+      const base = renderFilenameTemplate(rule.filenameTemplate || getFilenameTemplate(), {
+        vendor: rule.vendor,
+        date: item.message.receivedDateTime
+      });
+      names.set(item, { base });
+      const key = base.toLowerCase();
+      if (!byName.has(key)) byName.set(key, []);
+      byName.get(key).push(item);
+    } catch (error) {
+      names.set(item, { error });
+    }
+  }
+  for (const members of byName.values()) {
+    if (members.length < 2) continue;
+    const token = (item, kind) => fileNameToken(item.receipt[kind]).toLowerCase();
+    for (const item of members) {
+      const kind = NUMBER_KINDS.find(k =>
+        token(item, k) && members.filter(m => token(m, k) === token(item, k)).length === 1);
+      if (kind) names.get(item).base = withSuffix(names.get(item).base, ` ${fileNameToken(item.receipt[kind])}`);
+    }
+  }
+  for (const item of representatives) {
+    const naming = names.get(item);
+    if (naming.base) naming.fileName = dedupeFilename(naming.base, usedNames);
+  }
+  return names;
 }
 
 /** sender, forwarded and (for a forward with a quoted header) the original sender. */
@@ -223,38 +414,52 @@ function receiptFields(receipt) {
   for (const kind of NUMBER_KINDS) {
     if (receipt[kind]) fields[kind] = receipt[kind];
   }
+  if (receipt.productSource) fields.productSource = receipt.productSource;
   return fields;
 }
 
 /**
- * Prefer the totals printed in the saved PDF over the email body's. Never
- * throws: an unreadable PDF leaves the body amounts in place with a note.
+ * Prefer the labelled total printed in the saved PDF over the email body's.
+ * Reads the file only if it still holds this receipt's bytes. Never throws:
+ * an unreadable PDF leaves the body amounts in place with a note.
  */
-async function applyPdfAmounts(entry, savedPath, rules) {
+async function applyPdfAmounts(entry, saved, rules, parsePdf = parseReceiptPdf) {
   let pdf;
   try {
-    pdf = await parseReceiptPdf(await fs.promises.readFile(savedPath), rules);
+    const bytes = await fs.promises.readFile(saved.savedPath);
+    if (saved.sha256 && sha256Hex(bytes) !== saved.sha256) {
+      throw new Error('the file no longer holds the bytes saved for this receipt');
+    }
+    pdf = await parsePdf(bytes, rules);
   } catch (error) {
     entry.amountSource = 'body';
     entry.pdfParseNote = `saved PDF could not be parsed (${error?.message || error}); amounts are from the email body`;
     return;
   }
-  const bodyTotal = entry.amount;
-  if (pdf.amounts?.total !== null && pdf.amounts?.total !== undefined) {
-    entry.amount = pdf.amounts.total;
+  const bodyTotal = typeof entry.amount === 'number' ? entry.amount : null;
+  const pdfTotal = typeof pdf.amounts?.total === 'number' ? pdf.amounts.total : null;
+  // totalLabel null: no total/amount paid/amount due label, the figure is a guess.
+  // A parser that predates the label (undefined) is taken as labelled.
+  const guessed = pdfTotal !== null && pdf.amounts.totalLabel === null;
+  if (guessed) entry.pdfTotalGuessed = true;
+  if (pdfTotal !== null && bodyTotal !== null && Math.abs(bodyTotal - pdfTotal) > 0.005) {
+    entry.amountMismatch = { body: bodyTotal, pdf: pdfTotal };
+  }
+  if (pdfTotal !== null && !(guessed && bodyTotal !== null)) {
+    entry.amount = pdfTotal;
     entry.currency = pdf.amounts.currency || entry.currency;
     entry.taxAmount = pdf.amounts.tax ?? null;
     entry.amounts = { ...pdf.amounts };
     entry.amountSource = 'pdf';
-    if (typeof bodyTotal === 'number' && Math.abs(bodyTotal - pdf.amounts.total) > 0.005) {
-      entry.amountMismatch = { body: bodyTotal, pdf: pdf.amounts.total };
-    }
   } else {
     entry.amountSource = 'body';
   }
-  if (!entry.productLabel && pdf.productLabel) entry.productLabel = pdf.productLabel;
-  if (!entry.invoiceNumber && pdf.invoiceNumber) entry.invoiceNumber = pdf.invoiceNumber;
-  if (!entry.receiptNumber && pdf.receiptNumber) entry.receiptNumber = pdf.receiptNumber;
+  if (!entry.productLabel && pdf.productLabel) {
+    entry.productLabel = capStr(pdf.productLabel);
+    entry.productSource = 'pdf';
+  }
+  if (!entry.invoiceNumber && pdf.invoiceNumber) entry.invoiceNumber = capStr(pdf.invoiceNumber);
+  if (!entry.receiptNumber && pdf.receiptNumber) entry.receiptNumber = capStr(pdf.receiptNumber);
 }
 
 function recordSaved(entry, saved, method, isFormalInvoice) {
@@ -266,6 +471,72 @@ function recordSaved(entry, saved, method, isFormalInvoice) {
     isFormalInvoice,
     sha256: saved.sha256
   });
+  if (saved.existingDiffers) entry.existingDiffers = true;
+}
+
+/**
+ * Product label and line items read from the message's PDF attachment, for a
+ * receipt whose email body names no product. Memoised per message (ctx) and
+ * prefer; a failure comes back as { error } and is never fatal.
+ */
+async function pdfProduct(ctx, prefer) {
+  if (ctx.byPrefer.has(prefer)) return ctx.byPrefer.get(prefer);
+  let result;
+  try {
+    if (!ctx.attachments) {
+      const list = throwIfMcpError(await ctx.graphApiClient.makeRequest(
+        `${ctx.base}/messages/${ctx.messageId}/attachments`,
+        { select: ATTACHMENT_LIST_SELECT }
+      ));
+      ctx.attachments = list.value || [];
+    }
+    const pdf = selectPdfAttachment(ctx.attachments, prefer);
+    if (!pdf) throw new Error('no PDF attachment found');
+    const { buffer } = await fetchAttachmentContent(
+      ctx.graphApiClient, ctx.base, ctx.messageId, pdf.id, { attachmentName: pdf.name }
+    );
+    const parsed = await ctx.parsePdf(buffer, ctx.rules);
+    result = { productLabel: capStr(parsed?.productLabel || null), lineItems: parsed?.lineItems || [] };
+  } catch (error) {
+    result = { error: mcpErrorText(error) };
+    logCollectEvent({ stage: 'claim-pdf-product', outcome: 'error', messageId: ctx.messageId, error: result.error });
+  }
+  ctx.byPrefer.set(prefer, result);
+  return result;
+}
+
+const PDF_TIMESTAMPS = /\/(CreationDate|ModDate)\s*\(D:[^)]*\)/g;
+
+function withoutPdfTimestamps(buffer) {
+  return buffer.toString('latin1').replace(PDF_TIMESTAMPS, '/$1()');
+}
+
+/**
+ * Chrome stamps every rendering with its creation time, so rendering the same
+ * email twice never gives identical bytes. Under onExisting 'skip' an earlier
+ * rendering at this name that differs only in those timestamps is handed back
+ * in place of the fresh one, so a re-run skips it instead of adding a version.
+ */
+function renderDeps(deps, destDir, fileName, onExisting) {
+  if (onExisting !== 'skip') return deps;
+  const render = deps.renderImpl || renderHtmlToPdfBuffer;
+  return {
+    ...deps,
+    renderImpl: async (doc) => {
+      const fresh = await render(doc);
+      if (!Buffer.isBuffer(fresh)) return fresh;
+      try {
+        const stable = withoutPdfTimestamps(fresh);
+        for (const candidate of existingVersionPaths(destDir, fileName)) {
+          const existing = await fs.promises.readFile(candidate);
+          if (withoutPdfTimestamps(existing) === stable) return existing;
+        }
+      } catch {
+        // Comparison is best-effort: the fresh rendering is saved under the normal policy.
+      }
+      return fresh;
+    }
+  };
 }
 
 async function searchMessages(graphApiClient, base, filters) {
@@ -332,7 +603,8 @@ async function chooseRepresentative(members, graphApiClient, base) {
 }
 
 export async function collectReceiptsTool(authManager, args, deps = {}) {
-  const { periodStart, periodEnd, vendors, destDir, onExisting = 'skip', mailbox } = args || {};
+  const { periodStart, periodEnd, vendors, destDir, mailbox } = args || {};
+  const onExisting = args?.onExisting ?? 'skip';
 
   if (!periodStart || !ISO_DATE.test(periodStart)) {
     return createValidationError('periodStart', 'Required ISO date or date-time, e.g. 2026-06-01 or 2026-06-01T00:00:00Z');
@@ -343,19 +615,21 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
   if (!Array.isArray(vendors) || vendors.length === 0) {
     return createValidationError('vendors', 'At least one vendor rule is required');
   }
+  // Everything that could otherwise fail per receipt, or abort after files
+  // were written, is checked here, before any Graph call.
   for (const rule of vendors) {
-    if (!rule?.vendor) return createValidationError('vendors', 'Each rule needs a vendor name');
-    if (!rule.from && !rule.subjectContains) {
-      return createValidationError('vendors', `Rule '${rule.vendor}' needs a from and/or subjectContains matcher`);
-    }
-    for (const field of ['productContains', 'productExcludes']) {
-      const problem = productTermsError(rule[field]);
-      if (problem) return createValidationError('vendors', `Rule '${rule.vendor}': ${field} ${problem}`);
-    }
+    const problem = ruleError(rule, periodStart);
+    if (problem) return createValidationError('vendors', problem);
   }
+  if (!ON_EXISTING.includes(onExisting)) {
+    return createValidationError('onExisting', `must be one of ${ON_EXISTING.join(', ')}`);
+  }
+  const destProblem = destDirError(destDir);
+  if (destProblem) return createValidationError('destDir', destProblem);
 
   try {
     const rules = loadReceiptRules();
+    const parsePdf = deps.parsePdf || parseReceiptPdf;
     await authManager.ensureAuthenticated();
     const graphApiClient = authManager.getGraphApiClient();
     // One base for the whole run: searches and every per-message core call
@@ -370,6 +644,7 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
     // Entries are kept per rule (an ambiguous entry under its first candidate)
     // so the manifest reads vendor by vendor.
     const buckets = vendors.map(() => []);
+    const unmatched = [];
     const involved = new Set();
     const vendorOf = (index) => vendors[index].vendor;
 
@@ -459,6 +734,9 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
       }
 
       const claims = [];
+      const rejections = [];
+      let pdfCtx = null;
+      let pdfProductError = null;
       for (const [index, state] of states.entries()) {
         const signals = headerSignals(state.rule, message);
         if (signals.length === 0) {
@@ -469,14 +747,43 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
           claims.push({ index, signals, product: { verdict: 'none', signals: [] } });
           continue;
         }
-        const product = evaluateProduct(state.rule, receipt);
+        let product = evaluateProduct(state.rule, receipt);
+        let fromPdf = null;
+        // No product in the email body: read it from the PDF before deciding.
+        if (product.verdict === 'unknown' && receipt.hasPdfAttachment) {
+          pdfCtx ??= { graphApiClient, base, messageId: message.id, rules, parsePdf, attachments: null, byPrefer: new Map() };
+          const read = await pdfProduct(pdfCtx, state.rule.prefer || 'invoice');
+          if (read.error) {
+            pdfProductError = read.error;
+          } else if (read.productLabel || read.lineItems.length > 0) {
+            fromPdf = read;
+            product = evaluateProduct(state.rule, read);
+          }
+        }
         if (product.verdict === 'reject') {
           state.excludedByProduct++;
+          rejections.push({ index, productLabel: fromPdf ? fromPdf.productLabel : receipt.productLabel });
           continue;
         }
-        claims.push({ index, signals, product });
+        claims.push({ index, signals, product, fromPdf });
       }
-      if (claims.length === 0) continue;
+      if (claims.length === 0) {
+        if (rejections.length > 0) {
+          // Every rule that matched the sender/subject rejected the product: reported, never dropped.
+          unmatched.push({
+            messageId: message.id,
+            date: message.receivedDateTime,
+            subject: capStr(message.subject ?? null),
+            sender: senderOf(message),
+            productLabel: rejections[0].productLabel ?? null,
+            rejectedBy: rejections.map(r => vendorOf(r.index))
+          });
+          logCollectEvent({
+            stage: 'claim', outcome: 'unmatched', messageId: message.id, rejectedBy: rejections.map(r => vendorOf(r.index))
+          });
+        }
+        continue;
+      }
       const soleRule = claims.length === 1 ? vendors[claims[0].index] : null;
 
       if (extractFailure) {
@@ -505,7 +812,11 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
         const { contenders } = resolved;
         contenders.forEach(c => involved.add(c.index));
         const single = contenders.length === 1 ? vendors[contenders[0].index] : null;
-        buckets[contenders[0].index].push({
+        const pdfRead = contenders.find(c => c.fromPdf)?.fromPdf;
+        const shown = pdfRead
+          ? { ...receipt, productLabel: pdfRead.productLabel || receipt.productLabel, productSource: 'pdf' }
+          : receipt;
+        const ambiguous = {
           vendor: single ? single.vendor : null,
           status: 'ambiguous',
           candidates: contenders.map(c => vendorOf(c.index)),
@@ -513,8 +824,10 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
           date: message.receivedDateTime,
           sourceMessageId: message.id,
           ...senderFields(single, message, receipt),
-          ...receiptFields(receipt)
-        });
+          ...receiptFields(shown)
+        };
+        if (resolved.reason === PRODUCT_UNKNOWN_REASON && pdfProductError) ambiguous.pdfProductError = pdfProductError;
+        buckets[contenders[0].index].push(ambiguous);
         logCollectEvent({
           stage: 'claim', status: 'ambiguous', candidates: contenders.map(c => vendorOf(c.index)),
           messageId: message.id, reason: resolved.reason
@@ -525,28 +838,22 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
       const { winner } = resolved;
       involved.add(winner.index);
       owned.push({
-        message, receipt, ruleIndex: winner.index,
+        message,
+        receipt: winner.fromPdf
+          ? { ...receipt, productLabel: winner.fromPdf.productLabel || receipt.productLabel, productSource: 'pdf' }
+          : receipt,
+        ruleIndex: winner.index,
         matchedBy: [...winner.signals, ...winner.product.signals]
       });
     }
 
     // --- Dedupe copies of one receipt -------------------------------------
-    const groups = new Map();
-    for (const item of owned) {
-      const key = dedupeKey(item.receipt);
-      item.groupId = key
-        ? `${item.ruleIndex}|${key.kind}|${key.value.toLowerCase()}`
-        : `message|${item.message.id}`;
-      if (!groups.has(item.groupId)) groups.set(item.groupId, { kind: key?.kind, members: [] });
-      groups.get(item.groupId).members.push(item);
-    }
-    for (const group of groups.values()) {
+    const groups = groupCopies(owned);
+    for (const group of groups) {
       group.representative = group.members.length > 1
         ? await chooseRepresentative(group.members, graphApiClient, base)
         : group.members[0];
-      if (group.kind) {
-        group.label = `${group.kind}:${group.representative.receipt[group.kind].trim()}`;
-      }
+      for (const member of group.members) member.group = group;
     }
 
     // A billing link shared by several distinct receipts is a generic portal
@@ -556,15 +863,17 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
       const url = item.receipt.billingPdfUrl;
       if (!url) continue;
       if (!linkUse.has(url)) linkUse.set(url, new Set());
-      linkUse.get(url).add(item.groupId);
+      linkUse.get(url).add(item.group);
     }
+
+    const fileNames = assignFileNames(groups.map(g => g.representative), vendors, usedNames);
 
     // --- Save -------------------------------------------------------------
     const saveOrder = [];
     for (const item of owned) {
       const { message, receipt } = item;
       const { rule, searchNote } = states[item.ruleIndex];
-      const group = groups.get(item.groupId);
+      const { group } = item;
       const entry = {
         vendor: rule.vendor,
         status: null,
@@ -574,11 +883,12 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
         ...senderFields(rule, message, receipt)
       };
       if (searchNote) entry.searchNote = searchNote;
+      if (item.numberConflicts.length > 0) entry.numberConflict = item.numberConflicts.join('; ');
       buckets[item.ruleIndex].push(entry);
 
       if (group.representative !== item) {
         entry.status = 'duplicate';
-        entry.duplicate_of = group.label;
+        entry.duplicate_of = duplicateLabel(item, group.representative);
         entry.duplicateOfMessageId = group.representative.message.id;
         for (const kind of NUMBER_KINDS) {
           if (receipt[kind]) entry[kind] = receipt[kind];
@@ -605,11 +915,9 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
       let fileName = null;
       let saved = null;
       try {
-        const template = rule.filenameTemplate || getFilenameTemplate();
-        fileName = dedupeFilename(renderFilenameTemplate(template, {
-          vendor: rule.vendor,
-          date: message.receivedDateTime
-        }), usedNames);
+        const naming = fileNames.get(item);
+        if (naming.error) throw naming.error;
+        fileName = naming.fileName;
 
         if (formal === 'attachment') {
           saved = await saveAttachmentCore(graphApiClient, {
@@ -623,7 +931,7 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
           recordSaved(entry, saved, 'attachment', true);
           entry.attachmentId = saved.attachmentId;
           entry.attachmentName = saved.attachmentName;
-          await applyPdfAmounts(entry, saved.savedPath, rules);
+          await applyPdfAmounts(entry, saved, rules, parsePdf);
         } else if (formal === 'link') {
           saved = await fetchBillingPdfCore(graphApiClient, {
             url: receipt.billingPdfUrl,
@@ -633,7 +941,7 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
             mailbox
           }, deps);
           recordSaved(entry, saved, 'link', true);
-          await applyPdfAmounts(entry, saved.savedPath, rules);
+          await applyPdfAmounts(entry, saved, rules, parsePdf);
         } else {
           saved = await renderEmailPdfCore(graphApiClient, {
             messageId: message.id,
@@ -641,7 +949,7 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
             fileName,
             onExisting,
             mailbox
-          }, deps);
+          }, renderDeps(deps, destDir, fileName, onExisting));
           recordSaved(entry, saved, 'rendered', false);
           entry.amountSource = 'body';
         }
@@ -660,6 +968,7 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
           error: failure.text,
           amountSource: 'body'
         });
+        if (Array.isArray(failure.details?.attemptedRoutes)) entry.attemptedRoutes = [...failure.details.attemptedRoutes];
         if (formal === 'attachment') {
           entry.attachmentId = failure.details?.attachmentId ?? null;
           entry.attachmentName = failure.details?.attachmentName ?? null;
@@ -673,13 +982,14 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
         // never mistaken for (or later skipped in place of) the formal invoice.
         if (formal && fileName) {
           try {
+            const renderedName = dedupeFilename(withSuffix(fileName, ' (rendered)'), usedNames);
             const rendered = await renderEmailPdfCore(graphApiClient, {
               messageId: message.id,
               destDir,
-              fileName: dedupeFilename(withSuffix(fileName, ' (rendered)'), usedNames),
+              fileName: renderedName,
               onExisting,
               mailbox
-            }, deps);
+            }, renderDeps(deps, destDir, renderedName, onExisting));
             entry.renderedFallback = {
               savedPath: rendered.savedPath,
               sha256: rendered.sha256,
@@ -688,6 +998,10 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
               isFormalInvoice: false,
               reason: `the ${formal} could not be fetched; this is a rendering of the email body, not the formal invoice`
             };
+            if (rendered.existingDiffers) entry.renderedFallback.existingDiffers = true;
+            // What the run holds for this receipt is a rendering, never the invoice.
+            entry.method = 'rendered';
+            entry.isFormalInvoice = false;
             logCollectEvent({
               vendor: rule.vendor, stage: 'render-fallback', status: 'fetch_failed', outcome: rendered.action,
               sha256: rendered.sha256, messageId: message.id
@@ -709,12 +1023,17 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
     }
 
     // --- Identical files saved for different messages ----------------------
-    const firstBySha = new Map();
+    // Identical bytes mean one receipt only when the entries' receipt/invoice/
+    // order numbers do not contradict each other: a vendor may reuse one PDF
+    // for distinct receipts, and those are kept (sameFileAs names the other).
+    const keptBySha = new Map();
     for (const entry of saveOrder) {
       if (!entry.sha256 || (entry.status !== 'saved' && entry.status !== 'skipped')) continue;
-      const first = firstBySha.get(entry.sha256);
+      const kept = keptBySha.get(entry.sha256) || [];
+      const first = kept.find(other => !numbersConflict(other, entry));
       if (!first) {
-        firstBySha.set(entry.sha256, entry);
+        if (kept.length > 0) entry.sameFileAs = kept[0].sourceMessageId;
+        keptBySha.set(entry.sha256, [...kept, entry]);
         continue;
       }
       // Only a file this run created is removed; a pre-existing one is left alone.
@@ -762,6 +1081,7 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
     const manifest = buckets.flat();
     const summary = Object.fromEntries(STATUSES.map(status => [status, 0]));
     for (const entry of manifest) summary[entry.status]++;
+    summary.unmatched = unmatched.length;
     // Separate copies: the response serialiser treats a repeated object as circular.
     const failed = manifest.filter(e => e.status === 'fetch_failed').map(e => structuredClone(e));
 
@@ -770,6 +1090,7 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
       manifest,
       missing,
       failed,
+      unmatched,
       summary,
       notes
     });

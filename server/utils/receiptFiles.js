@@ -88,15 +88,43 @@ export function isPdfBuffer(buffer) {
   return Buffer.isBuffer(buffer) && buffer.length >= 4 && buffer.subarray(0, 4).toString('latin1') === '%PDF';
 }
 
-function nextVersionedPath(filePath) {
+function versionedPath(filePath, n) {
   const ext = path.extname(filePath);
   const base = ext ? filePath.slice(0, -ext.length) : filePath;
+  return `${base} (${n})${ext}`;
+}
+
+function nextVersionedPath(filePath) {
   for (let i = 2; ; i++) {
-    const candidate = `${base} (${i})${ext}`;
+    const candidate = versionedPath(filePath, i);
     if (!fs.existsSync(candidate)) return candidate;
   }
 }
 
+/** The file itself and its "name (2)", "name (3)"... versions that exist, up to the first gap. */
+function existingVersionsOf(filePath) {
+  const found = [];
+  for (let i = 1; ; i++) {
+    const candidate = i === 1 ? filePath : versionedPath(filePath, i);
+    if (!fs.existsSync(candidate)) return found;
+    found.push(candidate);
+  }
+}
+
+/** Paths a save of fileName into destDir would compare against under onExisting 'skip'. */
+export function existingVersionPaths(destDir, fileName) {
+  return existingVersionsOf(resolveDestination(destDir, fileName).filePath);
+}
+
+/**
+ * Write bytes atomically under the collision policy:
+ * - skip: an existing file is kept only when it holds exactly these bytes
+ *   (sha256); a file holding other bytes is never reported in their place, so
+ *   the bytes go to the first numbered version that already holds them, else
+ *   to a new one, and the result carries existingDiffers: true.
+ * - version: always a new "name (n)" file when the name is taken.
+ * - overwrite: replace the file.
+ */
 export async function saveReceiptFile(buffer, destDir, fileName, options = {}) {
   const { onExisting = 'skip' } = options;
   if (!['skip', 'overwrite', 'version'].includes(onExisting)) {
@@ -111,12 +139,21 @@ export async function saveReceiptFile(buffer, destDir, fileName, options = {}) {
 
   let target = filePath;
   let action = 'saved';
+  let existingDiffers = false;
   if (fs.existsSync(filePath)) {
     if (onExisting === 'skip') {
-      const existing = await fs.promises.readFile(filePath);
-      return { savedPath: filePath, action: 'skipped', sha256: sha256Hex(existing), size: existing.length };
-    }
-    if (onExisting === 'version') {
+      const sha256 = sha256Hex(buffer);
+      for (const candidate of existingVersionsOf(filePath)) {
+        if (sha256Hex(await fs.promises.readFile(candidate)) === sha256) {
+          const result = { savedPath: candidate, action: 'skipped', sha256, size: buffer.length };
+          if (candidate !== filePath) result.existingDiffers = true;
+          return result;
+        }
+      }
+      existingDiffers = true;
+      target = nextVersionedPath(filePath);
+      action = 'versioned';
+    } else if (onExisting === 'version') {
       target = nextVersionedPath(filePath);
       action = 'versioned';
     } else {
@@ -133,5 +170,7 @@ export async function saveReceiptFile(buffer, destDir, fileName, options = {}) {
     throw error;
   }
 
-  return { savedPath: target, action, sha256: sha256Hex(buffer), size: buffer.length };
+  const result = { savedPath: target, action, sha256: sha256Hex(buffer), size: buffer.length };
+  if (existingDiffers) result.existingDiffers = true;
+  return result;
 }

@@ -197,23 +197,25 @@ Five tools support autonomous expense-receipt collection (e.g. a scheduled month
 
 #### Collect results
 
-`outlook_collect_receipts` returns `{ period, manifest, missing, failed, summary, notes }`. Every manifest entry has a `status`:
+`outlook_collect_receipts` returns `{ period, manifest, missing, failed, unmatched, summary, notes }`. Every manifest entry has a `status`:
 
 | Status | Meaning |
 |--------|---------|
 | `saved` | A new PDF was written. `method` is `attachment`, `link` or `rendered`; `isFormalInvoice` is `false` for a `rendered` copy of the email. |
-| `skipped` | The target file already exists (`onExisting: skip`); nothing was written. |
+| `skipped` | The target file already holds exactly these bytes (`onExisting: skip`); nothing was written. A file holding *different* bytes is never skipped in its place: the receipt is saved as `name (2).pdf` (or the numbered version that already holds it) with `existingDiffers: true`. The same rule applies to `outlook_save_attachment` and `outlook_download_attachment`. |
 | `not_found` | Nothing matched the rule in the period. Only these vendors appear in `missing[]`. |
 | `fetch_failed` | A receipt was found but could not be searched for, read or saved. Every such entry is also listed in `failed[]`. |
 | `ambiguous` | Several rules claim the message, or its product cannot be determined; `candidates` names the rules and `reason` says why. |
 | `duplicate` | A forwarded/replied copy of a receipt already covered in the run; `duplicate_of` names it. |
 
-- `failed[]` has one object per `fetch_failed` entry: `attemptedRoute` (`search`, `message`, `attachment`, `link` or `render`), `messageId`, `attachmentId`/`attachmentName` (attachment route) and the verbatim `graphError`. "Nothing to collect" and "found it but could not save it" are therefore never confused.
-- When a formal PDF (attachment or link) cannot be saved, the entry stays `fetch_failed` and gets a `renderedFallback` — a rendering of the email saved under its own `(rendered)` name with `isFormalInvoice: false`, so it is never mistaken for the invoice.
-- `summary` counts entries per status; `notes` carries run-level remarks (e.g. a Sent Items/Drafts folder that could not be resolved, or messages excluded by product matchers).
-- **Duplicates**: forwarded and replied copies of one receipt are grouped by receipt number, else invoice number, else order number (identical PDF bytes — `sha256` — catch the rest after saving). The copy carrying the PDF (preferring an `Invoice-*.pdf`) is kept; the others become `duplicate` with `duplicate_of` (e.g. `receiptNumber:…` or `sha256:…`). Messages in Sent Items and Drafts are ignored.
+- `failed[]` has one object per `fetch_failed` entry: `attemptedRoute` (`search`, `message`, `attachment`, `link` or `render`), `attemptedRoutes` (the attachment content routes tried, e.g. `["json", "value"]`), `messageId`, `attachmentId`/`attachmentName` (attachment route) and the verbatim `graphError`. "Nothing to collect" and "found it but could not save it" are therefore never confused.
+- When a formal PDF (attachment or link) cannot be saved, the entry stays `fetch_failed` and gets a `renderedFallback` — a rendering of the email saved under its own `(rendered)` name — and the entry itself carries `method: rendered` and `isFormalInvoice: false`, so it is never mistaken for the invoice (`savedPath` is only inside `renderedFallback`).
+- `unmatched[]` lists every message that matched a rule's sender/subject but was rejected by the product matchers of every such rule: `{ messageId, date, subject, sender, productLabel, rejectedBy }`. It does not block the run.
+- `summary` counts entries per status plus `unmatched`; `notes` carries run-level remarks (e.g. a Sent Items/Drafts folder that could not be resolved, or messages excluded by product matchers).
+- **Duplicates**: forwarded and replied copies of one receipt are grouped when they share a receipt, invoice or order number — but never when their known totals differ (two charges on one order stay two receipts; a receipt number shared by different totals adds a `numberConflict` note to both). Identical PDF bytes (`sha256`) catch the rest after saving, unless the entries' numbers contradict each other (then both are kept and `sameFileAs` names the other). The copy carrying the PDF (preferring an `Invoice-*.pdf`) is kept; the others become `duplicate` with `duplicate_of` (e.g. `receiptNumber:…` or `sha256:…`). Messages in Sent Items and Drafts are ignored.
+- **File names** come from the template (`{vendor} {DDMmmYY} Invoice.pdf`). When several receipts in one run would get the same name (one vendor, one day), each gets its own receipt/invoice/order number appended (`Acme 10Jun26 Invoice 1001-2002.pdf`), so re-runs map every receipt to the same file; an ordinal `(2)` is used only for receipts with no number.
 - Entries carry `sender`, a `forwarded` flag and, for forwards with a quoted header, `originalSender`.
-- **Amounts** are structured and gross: `amounts` is `{ subtotal, tax, credits, total, amountPaid, currency, source }`, and `amount`/`taxAmount` are the total charged and the tax sum. For attachment and link saves the figures are re-read from the saved PDF (`amountSource: pdf`, else `body`); `amountMismatch` (`{ body, pdf }`) appears when the email body disagrees.
+- **Amounts** are structured and gross: `amounts` is `{ subtotal, tax, credits, total, amountPaid, currency, source, totalLabel }`, and `amount`/`taxAmount` are the total charged and the tax sum. For attachment and link saves the figures are re-read from the saved PDF when its total is labelled (`totalLabel` is `amount paid`, `total` or `amount due`; `amountSource: pdf`). An unlabelled (guessed) PDF figure never replaces the email's total — it is used only when the email has none — and sets `pdfTotalGuessed: true`. `amountMismatch` (`{ body, pdf }`) appears when the two disagree.
 - A billing link is used only when it is unique to one receipt in the run; a link shared by several receipts is skipped (`linkSkipped`).
 
 #### Product matchers
@@ -229,7 +231,8 @@ A vendor rule passed to `outlook_collect_receipts` may also carry `productContai
 ```
 
 - A receipt whose product matches a `productContains` rule belongs to that rule; it beats a rule without product matchers (here, `Acme Other` only receives what the other two reject). `productExcludes` can replace the catch-all: `{ "vendor": "Acme Other", "from": "billing@acme.example", "productExcludes": ["hosting", "domain", "support plan"] }`.
-- If several rules still claim a receipt, or its product cannot be read while a rule depends on it, the entry is `ambiguous` with `candidates` — it is never guessed, silently accepted or dropped.
+- When the email body names no product (no product label or line items) and a rule depends on one, the product is read from the PDF attachment before deciding (`productSource: pdf`).
+- If several rules still claim a receipt, or its product cannot be read from the email or the PDF while a rule depends on it, the entry is `ambiguous` with `candidates` (and `pdfProductError` if the PDF could not be read) — it is never guessed or silently accepted. A receipt that every matching rule rejects is listed in `unmatched[]`, never silently dropped.
 
 #### Extracted fields
 
