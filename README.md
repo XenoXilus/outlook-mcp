@@ -158,7 +158,7 @@ Personal Microsoft accounts can also register apps in Azure:
 | `MCP_OUTLOOK_SHARED_MAILBOX` | No | Default mailbox for the per-call 'mailbox' argument; empty = own mailbox. |
 | `MCP_OUTLOOK_KNOWN_MAILBOXES` | No | Comma-separated shared mailboxes offered by `outlook_list_shared_mailboxes` discovery |
 
-The desktop extension (DXT) exposes only the mail settings above. The receipt/invoice-run behaviour below is configured **by the calling process** (e.g. a scheduled routine's MCP server config) via environment variables — it is intentionally not part of the extension settings UI:
+The desktop extension (DXT) exposes only the mail settings above. The receipt/invoice behaviour below is configured **by the calling process** (e.g. a scheduled routine's MCP server config) via environment variables — it is intentionally not part of the extension settings UI:
 
 | Variable | Description |
 |----------|-------------|
@@ -181,25 +181,72 @@ capture product labels, point `RECEIPT_RULES_PATH` at a JSON file
 - `vendorSenders`: `[{ "pattern": "<case-insensitive regex on the from address>", "vendor": "<name>" }]` — checked before the subject heuristic.
 - `productLabels`: `["<case-insensitive regex>", ...]` — first match becomes `productLabel`; without rules it is `null`.
 
-### Receipt & Invoice-Run Tools (v1.1)
+### Receipt & Invoice Tools
 
-Five tools support autonomous expense-receipt collection (e.g. a scheduled monthly invoice run):
+Five tools support autonomous expense-receipt collection (e.g. a scheduled monthly run):
 
 | Tool | Purpose |
 |------|---------|
 | `outlook_save_attachment` | Save an attachment's **original bytes** to a chosen path/filename. Auto-selects the `Invoice-*.pdf` when a Stripe receipt attaches both Invoice and Receipt PDFs (`prefer: invoice\|receipt\|first`). Validates `%PDF` magic bytes; returns path + SHA-256 + size. |
-| `outlook_fetch_billing_pdf` | Fetch the PDF behind a billing link in an email body (fallback when a forward loses its attachment). HTTPS-only, allowlist-only (redirects included), content-type + magic-byte validated, 25 MB / 30 s bounded. |
-| `outlook_extract_receipt` | Compact structured summary of a receipt email (vendor, amount, currency, receipt/invoice numbers, product label, billing link, attachment ids) — never the 60 KB+ HTML body. |
+| `outlook_fetch_billing_pdf` | Fetch the per-receipt invoice/receipt PDF download link in an email body (fallback when a forward loses its attachment). Only real PDF links are used — logo, image and other asset links are never fetched. HTTPS-only, allowlist-only (redirects included), content-type + magic-byte validated, 25 MB / 30 s bounded. |
+| `outlook_extract_receipt` | Compact structured summary of a receipt email (vendor, gross amounts, line items, product label, receipt/invoice/order numbers, reply/forward info, PDF links, attachment ids) — never the 60 KB+ HTML body. See [Extracted fields](#extracted-fields). |
 | `outlook_render_email_pdf` | Render the sanitised email HTML to PDF via headless Chrome — audit-trail fallback for receipts with no attachment and no link (e.g. app-store order receipts). |
-| `outlook_collect_receipts` | One call per period: discovers each vendor's receipts by sender/subject/date across the whole mailbox, saves every PDF (attachment → link → rendered fallback), and returns a manifest plus `missing[]`. Idempotent re-runs via `onExisting: skip\|overwrite\|version`. |
+| `outlook_collect_receipts` | One call per period: discovers each vendor's receipts by sender/subject/product/date across the whole mailbox (Sent Items and Drafts are ignored), collapses forwarded/replied copies of one receipt, saves one PDF per receipt (attachment → link → rendered fallback), and returns a manifest with a per-entry `status` plus `missing[]`, `failed[]`, `summary` and `notes`. Idempotent re-runs via `onExisting: skip\|overwrite\|version`. See [Collect results](#collect-results). |
 
 `outlook_create_draft` additionally accepts `attachmentPaths` (absolute local file paths, ≤ 3 MB each) and returns the draft's `webLink` — it stages the email for review and **never sends**.
 
-Receipt matching notes (v1.2):
+#### Collect results
+
+`outlook_collect_receipts` returns `{ period, manifest, missing, failed, summary, notes }`. Every manifest entry has a `status`:
+
+| Status | Meaning |
+|--------|---------|
+| `saved` | A new PDF was written. `method` is `attachment`, `link` or `rendered`; `isFormalInvoice` is `false` for a `rendered` copy of the email. |
+| `skipped` | The target file already exists (`onExisting: skip`); nothing was written. |
+| `not_found` | Nothing matched the rule in the period. Only these vendors appear in `missing[]`. |
+| `fetch_failed` | A receipt was found but could not be searched for, read or saved. Every such entry is also listed in `failed[]`. |
+| `ambiguous` | Several rules claim the message, or its product cannot be determined; `candidates` names the rules and `reason` says why. |
+| `duplicate` | A forwarded/replied copy of a receipt already covered in the run; `duplicate_of` names it. |
+
+- `failed[]` has one object per `fetch_failed` entry: `attemptedRoute` (`search`, `message`, `attachment`, `link` or `render`), `messageId`, `attachmentId`/`attachmentName` (attachment route) and the verbatim `graphError`. "Nothing to collect" and "found it but could not save it" are therefore never confused.
+- When a formal PDF (attachment or link) cannot be saved, the entry stays `fetch_failed` and gets a `renderedFallback` — a rendering of the email saved under its own `(rendered)` name with `isFormalInvoice: false`, so it is never mistaken for the invoice.
+- `summary` counts entries per status; `notes` carries run-level remarks (e.g. a Sent Items/Drafts folder that could not be resolved, or messages excluded by product matchers).
+- **Duplicates**: forwarded and replied copies of one receipt are grouped by receipt number, else invoice number, else order number (identical PDF bytes — `sha256` — catch the rest after saving). The copy carrying the PDF (preferring an `Invoice-*.pdf`) is kept; the others become `duplicate` with `duplicate_of` (e.g. `receiptNumber:…` or `sha256:…`). Messages in Sent Items and Drafts are ignored.
+- Entries carry `sender`, a `forwarded` flag and, for forwards with a quoted header, `originalSender`.
+- **Amounts** are structured and gross: `amounts` is `{ subtotal, tax, credits, total, amountPaid, currency, source }`, and `amount`/`taxAmount` are the total charged and the tax sum. For attachment and link saves the figures are re-read from the saved PDF (`amountSource: pdf`, else `body`); `amountMismatch` (`{ body, pdf }`) appears when the email body disagrees.
+- A billing link is used only when it is unique to one receipt in the run; a link shared by several receipts is skipped (`linkSkipped`).
+
+#### Product matchers
+
+A vendor rule passed to `outlook_collect_receipts` may also carry `productContains` and/or `productExcludes` (a string or an array of strings). Terms are case-insensitive substrings matched against the receipt's product label and its line-item descriptions, so one sender can be split into several labelled streams:
+
+```json
+"vendors": [
+  { "vendor": "Acme Hosting", "from": "billing@acme.example", "productContains": ["hosting", "domain"] },
+  { "vendor": "Acme Support", "from": "billing@acme.example", "productContains": "support plan" },
+  { "vendor": "Acme Other",   "from": "billing@acme.example" }
+]
+```
+
+- A receipt whose product matches a `productContains` rule belongs to that rule; it beats a rule without product matchers (here, `Acme Other` only receives what the other two reject). `productExcludes` can replace the catch-all: `{ "vendor": "Acme Other", "from": "billing@acme.example", "productExcludes": ["hosting", "domain", "support plan"] }`.
+- If several rules still claim a receipt, or its product cannot be read while a rule depends on it, the entry is `ambiguous` with `candidates` — it is never guessed, silently accepted or dropped.
+
+#### Extracted fields
+
+Besides vendor, `productLabel` and `attachmentIds`, `outlook_extract_receipt` returns:
+
+- `amounts` — `{ subtotal, tax, credits, total, amountPaid, currency, source }`. `amount` is the gross total charged (not the pre-tax subtotal) and `taxAmount` the tax sum. Credit and discount lines are summed; currency prefixes such as `CA$`, `A$`/`AU$`, `NZ$`, `US$`, `HK$` and ISO codes are recognised.
+- `lineItems[]` — `{ description, quantity, amount }`. `productLabel` falls back to their descriptions when no configured `productLabels` pattern matches.
+- `receiptNumber`, `invoiceNumber` (also read from an `Invoice-<CODE>-<NNNN>.pdf` attachment name) and `orderNumber`.
+- Reply/forward handling: `normalisedSubject` (`Re:`/`Fw:` stripped), `replyOrForward` and `quotedFrom` (`{ name, address }` of the innermost quoted `From:` header).
+- `billingPdfUrl` and `receiptPdfUrl` — per-receipt PDF download links on allowlisted hosts only; click-tracking wrappers are unwrapped, and image or logo links are never returned.
+
+#### Matching and download notes
 
 - A vendor rule's `from` and `subjectContains` combine as **OR** — either signal
-  matches a receipt, and each manifest entry reports `matchedBy`
-  (`from`, `from-normalised`, and/or `subject`).
+  matches a receipt (subjects are compared with `Re:`/`Fw:` prefixes ignored), and
+  each manifest entry reports `matchedBy` (`from`, `from-normalised`, `subject`,
+  and/or `product:…` signals).
 - Plus-addressed senders (`invoice+statements+acct_...@stripe.com`) match both
   exactly and via a plus-stripped fallback: when an exact `from` finds nothing,
   the collector retries on the base local part and keeps only messages whose
@@ -209,7 +256,22 @@ Receipt matching notes (v1.2):
   instead of stopping at midnight.
 - `outlook_download_attachment` accepts `saveToFile`/`destDir`/`fileName`/`onExisting`
   to write raw bytes server-side and return only `{savedPath, size, sha256}` —
-  use this for real invoice PDFs instead of inline base64.
+  use this for real invoice PDFs instead of inline base64. The saved file is
+  byte-exact with no inline size ceiling.
+- `outlook_download_attachment` and `outlook_save_attachment` read the attachment
+  content from its JSON item and fall back to the raw `/$value` endpoint, so
+  attachment ids containing `-`, `_` and `=` work. Only file attachments have
+  downloadable bytes: attached emails (item attachments) and reference
+  attachments are rejected with a clear message, and a failure on both routes
+  reports the routes tried, the ids and the Graph error.
+
+### Email search
+
+A free-text `outlook_search_emails` query (without a folder restriction) uses KQL, and its date range is sent to Microsoft Graph as a real property restriction with ISO UTC dates, e.g. `"receipt AND received:2026-06-01..2026-06-30"` — not matched as a literal phrase, and independent of the host's locale and time zone. Other searches use `$filter`.
+
+- Results are re-checked against the requested date window, sender and subject. Anything the service failed to filter is dropped and counted in `searchSummary.droppedOutsideFilters`.
+- A folder restriction is bound by the endpoint: a multi-folder search queries each folder and merges the results, rather than silently searching the whole mailbox.
+- KQL values are quoted only when they contain whitespace or KQL syntax; an unparseable date is a validation error.
 
 ### Shared mailboxes (v1.3)
 
@@ -327,6 +389,11 @@ The app requests these Microsoft Graph permissions:
 - **Solution**: Verify Azure AD app permissions and client ID
 - **Reset**: Clear stored tokens and re-authenticate
 
+### Graph API Errors
+- **Problem**: A tool fails with a Microsoft Graph error
+- **Details**: The error text includes the HTTP status, Graph error code and message, the `request-id` and `client-request-id`, and the request method and URL as sent (never the auth header), e.g. `HTTP 400 BadRequest: <message> [request-id: …; client-request-id: …] GET https://graph.microsoft.com/…`. The same data is returned structured as `_errorDetails.graphError` (plus `retryAfter` when Graph throttles), and per entry as `graphError` in `outlook_collect_receipts`' `failed[]`.
+- **Solution**: Quote the request ids when raising the failure with Microsoft support
+
 ### SharePoint Access Issues
 - **Problem**: Cannot access SharePoint files
 - **Solution**: Ensure sharing links are valid and user has access permissions
@@ -349,7 +416,7 @@ outlook-mcp/
 │   │   ├── calendar/         # Calendar tools
 │   │   ├── email/            # Email tools
 │   │   ├── folders/          # Folder management
-│   │   ├── receipts/         # Receipt/invoice-run tools
+│   │   ├── receipts/         # Receipt/invoice tools
 │   │   └── sharepoint/       # SharePoint tools
 │   └── utils/                # Utility modules
 └── package.json
