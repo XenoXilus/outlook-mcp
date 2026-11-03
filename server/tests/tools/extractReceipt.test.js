@@ -142,7 +142,7 @@ describe('extractReceiptTool (FR-3)', () => {
     expect(out.quotedFrom).toEqual({ name: 'Acme, Inc', address: 'invoice+statements@acme.example' });
     expect(out.vendor).toBe('Acme');
     expect(out.amounts).toEqual({
-      subtotal: 500, tax: 65, credits: null, total: 565, amountPaid: 565, currency: 'CAD', source: 'body'
+      subtotal: 500, tax: 50, credits: null, total: 550, totalLabel: 'amount paid', amountPaid: 550, currency: 'AUD', source: 'body'
     });
     expect(out.amount).toBe(550);
     expect(out.currency).toBe('AUD');

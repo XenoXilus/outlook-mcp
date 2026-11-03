@@ -1,5 +1,5 @@
 /**
- * Structured receipt extraction (FR-3).
+ * Structured receipt extraction.
  *
  * Parses vendor receipt emails into a compact typed summary — never returns
  * the raw HTML body. Built-in heuristics are fully generic (labelled amounts,
@@ -9,6 +9,10 @@
  *
  * The totals parser (parseReceiptTotals) works on plain text and is shared with
  * receiptPdfText.js, so email bodies and PDF text yield the same shape.
+ *
+ * Input is untrusted: text is capped (MAX_PARSE_CHARS) and very long lines are
+ * split (MAX_LINE_CHARS) before any regex work, regexes avoid ambiguous
+ * repetition, and every parsed string that escapes is length-capped.
  */
 
 import { stripHtml } from '../../utils/textUtils.js';
@@ -68,11 +72,12 @@ function parseNumber(s) {
   return parseFloat(s.replace(/,/g, ''));
 }
 
-function parenDepth(s) {
-  let depth = 0;
-  for (const ch of s) {
-    if (ch === '(') depth++;
-    else if (ch === ')' && depth > 0) depth--;
+/** Parenthesis depth after s[from..to), continuing from `depth` (a ')' never goes below 0). */
+function advanceParenDepth(s, from, to, depth) {
+  for (let i = from; i < to; i++) {
+    const ch = s.charCodeAt(i);
+    if (ch === 40) depth++; // (
+    else if (ch === 41 && depth > 0) depth--; // )
   }
   return depth;
 }
@@ -80,7 +85,11 @@ function parenDepth(s) {
 /** All currency amounts in a line: value (negative for -/–/(…) forms), currency code, span, inParens. */
 function scanAmounts(line) {
   const out = [];
+  let depth = 0;
+  let depthAt = 0; // depth is the parenthesis depth of line[0..depthAt) — tracked incrementally, not re-sliced per match
   for (const m of line.matchAll(AMOUNT_RE)) {
+    depth = advanceParenDepth(line, depthAt, m.index, depth);
+    depthAt = m.index;
     const g = m.groups;
     const value = parseNumber(g.n1 ?? g.n2 ?? g.n3);
     if (!Number.isFinite(value)) continue;
@@ -92,7 +101,7 @@ function scanAmounts(line) {
       currency: g.suffix || (g.post && (SYMBOL_CURRENCY[g.post] || g.post)) || g.pre || SYMBOL_CURRENCY[g.sym] || null,
       index: m.index,
       end,
-      inParens: !wrapped && parenDepth(line.slice(0, m.index)) > 0
+      inParens: !wrapped && depth > 0
     });
   }
   return out;
@@ -116,30 +125,58 @@ const round2 = (n) => Math.round(n * 100) / 100;
 
 const TAX_WORDS = 'VAT|GST|HST|PST|QST|sales tax|tax';
 // "(Includes VAT of £2.50)" / "Includes £2.50 VAT" — a tax figure embedded in the total line.
-const INCLUDES_TAX_RE = new RegExp(`\\(?\\s*\\bincludes?d?\\b[^()\\n]*?\\b(?:${TAX_WORDS})\\b[^()\\n]*\\)?`, 'i');
+// The gaps are bounded so a line of repeated "includes" cannot make the scan quadratic.
+const INCLUDES_TAX_RE = new RegExp(`\\(?\\s*\\bincludes?d?\\b[^()\\n]{0,100}?\\b(?:${TAX_WORDS})\\b[^()\\n]{0,100}\\)?`, 'i');
 const TAX_LABEL_RE = new RegExp(`\\b(?:${TAX_WORDS})\\b`, 'i');
 const NET_TOTAL_RE = /\btotal\b[^a-z]*\b(?:excl\w*|excluding|ex|before|net of|without)\b|\bnet\s+(?:total|amount)\b|\bexcl(?:uding|\.)?\s+(?:tax|vat|gst)\b/i;
-const CREDIT_RE = /\b(?:credits?|discount|coupon|promo\w*|rebate|off)\b|% off/i;
+const CREDIT_RE = /\b(?:credits?(?!\s*card)|discount|coupon|promo\w*|rebate|adjustments?|off)\b|% off/i;
 // Lines that open the totals section; item parsing stops there.
 const TOTALS_START_RE = new RegExp(
   `^(?:sub-?\\s?total\\b|total\\b|amount\\s+(?:paid|due)|balance\\s+due|includes?\\b|(?:${TAX_WORDS})\\b(?:\\s*[-:(].*)?$)`, 'i'
 );
 // Lines that are headings/metadata rather than a purchased item.
 const NOT_AN_ITEM_RE = /^(?:(?:receipt|invoice)\b.*\b(?:from|number|no\b|#)|(?:receipt|invoice)\s*[#:]|paid\b|payment\b|download\b|questions\b|powered\b|order\s*(?:number|no\b|#|id)|description\b|item\b|qty\b|quantity\b|unit price\b|amount\b|date\b|bill(?:ed)? to\b|ship(?:ped)? to\b|your (?:receipt|invoice|order)\b)/i;
-// A label that opens with one of these is a credit even when the amount is shown positive.
-const CREDIT_LEAD_RE = /^(?:discount|coupon|promo\w*)\b/i;
+// A label that opens with one of these is a credit even when the amount is shown positive
+// ("Credit $10.00", "Adjustment $2.00"), so it is never a line item. "Credit card …" is not.
+const CREDIT_LEAD_RE = /^(?:credits?(?!\s*card)|discount|coupon|promo\w*|adjustments?)\b/i;
 const QTY_LINE_RE = /^(?:qty|quantity)\.?\s*:?\s*(\d[\d,]*(?:\.\d+)?)$/i;
 
 const hasLetters = (s) => /[A-Za-z]/.test(s);
 const stripUnitWords = (s) => s.replace(/\/\s*[A-Za-z]+/g, ' ').replace(/\b(?:each|ea)\b/gi, ' ');
 
+// Bounds on untrusted text: a receipt is a few KB; anything past these is noise or an attack.
+const MAX_PARSE_CHARS = 200 * 1024;
+const MAX_LINE_CHARS = 2000;
+
+/** At most MAX_PARSE_CHARS of the input, as a string. */
+function capParseText(text) {
+  const s = String(text || '');
+  return s.length > MAX_PARSE_CHARS ? s.slice(0, MAX_PARSE_CHARS) : s;
+}
+
+/** Split a (whitespace-normalised) line into chunks of at most MAX_LINE_CHARS, at a space when possible. */
+function splitLongLine(line) {
+  if (line.length <= MAX_LINE_CHARS) return [line];
+  const parts = [];
+  let rest = line;
+  while (rest.length > MAX_LINE_CHARS) {
+    let cut = rest.lastIndexOf(' ', MAX_LINE_CHARS);
+    if (cut < MAX_LINE_CHARS / 2) cut = MAX_LINE_CHARS;
+    parts.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) parts.push(rest);
+  return parts;
+}
+
 function toLines(text) {
-  return String(text || '')
+  return capParseText(text)
     .replace(/[\u200B-\u200F\u2060\uFEFF\u034F\u00AD]/g, '')
     .replace(/[\u00A0\u2007\u202F]/g, ' ')
     .split(/\r\n|\r|\n/)
     .map(l => l.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .flatMap(splitLongLine);
 }
 
 function scanLine(raw) {
@@ -185,6 +222,14 @@ function classifyLabel(label) {
 }
 
 const TOTAL_KINDS = new Set(['subtotal', 'netTotal', 'tax', 'total', 'amountPaid', 'amountDue']);
+
+/** A credit/discount line (never a line item): credit-classified and either negative or opening with a credit word. */
+function isCreditLabel(label, value) {
+  return classifyLabel(label) === 'credit' && (value < 0 || CREDIT_LEAD_RE.test(label));
+}
+
+// How the chosen total was found (amounts.totalLabel); a first-amount fallback has no label.
+const TOTAL_LABELS = { amountPaid: 'amount paid', total: 'total', amountDue: 'amount due' };
 
 function isDescription(text) {
   return hasLetters(text) && text.length <= 200 && !text.includes('@') &&
@@ -233,6 +278,7 @@ function parseLineItems(scanned) {
       if (/\beach\b/i.test(text)) continue; // unit price under the line amount
       const next = scanned[i + 1]?.line || '';
       if (/^(?:paid|due|payment|date)\b/i.test(next)) { desc = null; continue; } // header summary amount
+      if (desc && isCreditLabel(desc, info.outside.at(-1).value)) { desc = null; qty = null; continue; } // "Credit" / "$10.00"
       const rowQty = text.match(/^\s*(\d[\d,]*(?:\.\d+)?)(?!\s*%|[\d.,])/);
       if (desc) push(desc, qty ?? (rowQty ? parseNumber(rowQty[1]) : null), info.outside.at(-1).value);
       desc = null;
@@ -246,8 +292,7 @@ function parseLineItems(scanned) {
     const first = info.outside[0];
     let prefix = info.line.slice(0, first.index).trim();
     const trailing = stripUnitWords(info.line.slice(info.outside.at(-1).end));
-    const isCredit = kind === 'credit' && (info.outside.at(-1).value < 0 || CREDIT_LEAD_RE.test(prefix));
-    if (!prefix || hasLetters(trailing) || !isDescription(prefix) || isCredit) {
+    if (!prefix || hasLetters(trailing) || !isDescription(prefix) || isCreditLabel(prefix, info.outside.at(-1).value)) {
       desc = null;
       continue;
     }
@@ -285,8 +330,12 @@ export function buildProductLabel(lineItems) {
  *
  * @param {string} text
  * @param {'body'|'pdf'} [source='body'] copied into amounts.source
+ * amounts.totalLabel says how the total was found: 'amount paid' | 'total' | 'amount due',
+ * or null when the total is only a fallback guess (the first amount in the text) or absent.
+ *
  * @returns {{ amounts: { subtotal: number|null, tax: number|null, credits: number|null,
- *   total: number|null, amountPaid: number|null, currency: string|null, source: string },
+ *   total: number|null, totalLabel: 'amount paid'|'total'|'amount due'|null,
+ *   amountPaid: number|null, currency: string|null, source: string },
  *   lineItems: { description: string, quantity: number|null, amount: number }[] }}
  */
 export function parseReceiptTotals(text, source = 'body') {
@@ -335,8 +384,8 @@ export function parseReceiptTotals(text, source = 'body') {
   }
 
   const paid = firstOf('amountPaid');
-  const chosen = paid || firstOf('total') || firstOf('amountDue') ||
-    scanned.flatMap(s => s.amounts).find(a => a.value >= 0) || null;
+  const labelled = paid || firstOf('total') || firstOf('amountDue') || null;
+  const chosen = labelled || scanned.flatMap(s => s.amounts).find(a => a.value >= 0) || null;
   const net = firstOf('netTotal');
 
   const lineItems = parseLineItems(scanned);
@@ -345,6 +394,7 @@ export function parseReceiptTotals(text, source = 'body') {
     tax,
     credits: sumOf('credit'),
     total: chosen ? chosen.value : null,
+    totalLabel: labelled ? TOTAL_LABELS[labelled.kind] : null,
     amountPaid: paid ? paid.value : null,
     currency: chosen?.currency || entries.find(e => e.currency)?.currency || null,
     source
@@ -362,7 +412,7 @@ export function detectVendor(fromAddress, subject = '', vendorSenders = []) {
     if (pattern.test(from)) return vendor;
   }
   // Payment processors send on behalf of vendors: "Your receipt from <Vendor> #1234"
-  const candidates = (subject || '').matchAll(/(?:receipt|invoice) from ([A-Za-z0-9][A-Za-z0-9 .&-]*?)(?:,| #|$)/gi);
+  const candidates = String(subject || '').slice(0, 1000).matchAll(/(?:receipt|invoice) from ([A-Za-z0-9][A-Za-z0-9 .&-]*?)(?:,| #|$)/gi);
   for (const [, candidate] of candidates) {
     const name = candidate.trim();
     if (name && !looksLikeDate(name)) return name; // "Order Receipt from 21 Mar 2026" is a date, not a vendor
@@ -401,12 +451,13 @@ function parseMailbox(raw) {
  * @returns {{ name: string|null, address: string|null }|null}
  */
 export function extractQuotedFrom(text) {
-  const lines = String(text || '').replace(/[\u200B-\u200F\u2060\uFEFF]/g, '').split(/\r\n|\r|\n/);
+  const lines = capParseText(text).replace(/[\u200B-\u200F\u2060\uFEFF]/g, '').split(/\r\n|\r|\n/)
+    .map(l => (l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS) : l));
   let found = null;
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^[\s>*]*From:\**\s*(.*?)\s*$/i);
+    const m = lines[i].match(/^[\s>*]*From:\**(.*)$/i);
     if (!m) continue;
-    let raw = m[1];
+    let raw = m[1].trim();
     let next = i + 1;
     if (!raw) { // value on the following line
       while (next < lines.length && !lines[next].trim()) next++;
@@ -427,24 +478,29 @@ export function extractQuotedFrom(text) {
 // ---------------------------------------------------------------------------
 
 // Codes must contain a digit, so a label followed by another label ("Payment method") never matches.
+// The separator is written (?:\s*:)?(?:\s*#)?\s* rather than \s*:?\s*#?\s* — the same language, but
+// no two whitespace runs are adjacent, so a long run of spaces cannot cause catastrophic backtracking.
 const CODE = '((?=[\\w-]*\\d)[A-Za-z0-9][\\w-]*)';
-const RECEIPT_NUMBER_RE = new RegExp(`receipt\\s*(?:number|no\\.?|#)\\s*:?\\s*#?\\s*${CODE}`, 'i');
-const INVOICE_NUMBER_RE = new RegExp(`invoice\\s*(?:number|no\\.?|#)\\s*:?\\s*#?\\s*${CODE}`, 'i');
-const ORDER_NUMBER_RE = /\border\s*(?:number|no\.?|#|id)\s*:?\s*#?\s*((?=[\w.-]*\d)[A-Za-z0-9](?:[\w.-]*[A-Za-z0-9])?)/i;
+const SEPARATOR = '(?:\\s*:)?(?:\\s*#)?\\s*';
+const RECEIPT_NUMBER_RE = new RegExp(`receipt\\s*(?:number|no\\.?|#)${SEPARATOR}${CODE}`, 'i');
+const INVOICE_NUMBER_RE = new RegExp(`invoice\\s*(?:number|no\\.?|#)${SEPARATOR}${CODE}`, 'i');
+const ORDER_NUMBER_RE = new RegExp(`\\border\\s*(?:number|no\\.?|#|id)${SEPARATOR}((?=[\\w.-]*\\d)[A-Za-z0-9](?:[\\w.-]*[A-Za-z0-9])?)`, 'i');
+
+function matchCapped(text, re) {
+  const match = capParseText(text).match(re);
+  return match ? capStr(match[1]) : null;
+}
 
 export function extractReceiptNumber(text) {
-  const match = text.match(RECEIPT_NUMBER_RE);
-  return match ? match[1] : null;
+  return matchCapped(text, RECEIPT_NUMBER_RE);
 }
 
 export function extractInvoiceNumber(text) {
-  const match = text.match(INVOICE_NUMBER_RE);
-  return match ? match[1] : null;
+  return matchCapped(text, INVOICE_NUMBER_RE);
 }
 
 export function extractOrderNumber(text) {
-  const match = text.match(ORDER_NUMBER_RE);
-  return match ? match[1] : null;
+  return matchCapped(text, ORDER_NUMBER_RE);
 }
 
 /** "Invoice-TSTINV42-0019.pdf" → "TSTINV42-0019" (first non-inline attachment named that way). */
@@ -452,7 +508,7 @@ export function extractInvoiceNumberFromAttachments(attachments) {
   for (const a of attachments || []) {
     if (a.isInline) continue;
     const match = (a.name || '').match(/^invoice[-_ ]+([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\.pdf$/i);
-    if (match) return match[1];
+    if (match) return capStr(match[1]);
   }
   return null;
 }
@@ -471,9 +527,10 @@ export function extractTaxAmount(text) {
 }
 
 export function extractProductLabel(text, productLabels = []) {
+  const capped = capParseText(text);
   for (const pattern of productLabels) {
-    const match = text.match(pattern);
-    if (match) return match[0].trim();
+    const match = capped.match(pattern);
+    if (match) return capStr(match[0].trim());
   }
   return null;
 }
@@ -495,10 +552,16 @@ function decodeHtmlEntities(s) {
     .replace(/&amp;|&#0*38;/g, '&');
 }
 
+// Billing/receipt links longer than this are dropped: real pre-signed links are a few
+// hundred characters, and an unbounded link would bypass the result size budget.
+const MAX_URL_LENGTH = 2048;
+
 /**
  * Unwrap a processor click-tracking link to the URL it redirects to:
  * https://<n>.email.stripe.com/CL0/<percent-encoded target>/1/<id>/<sig>=452 → target.
- * Anything else (or a target that is not https) is returned unchanged. Never fetches.
+ * The target is returned normalised (new URL(target).href), so it never carries raw
+ * spaces, quotes or line breaks. Anything else (or a target that does not parse as
+ * https) is returned unchanged. Never fetches.
  */
 export function unwrapTrackedUrl(url) {
   try {
@@ -506,8 +569,10 @@ export function unwrapTrackedUrl(url) {
     if (parsed.protocol !== 'https:' || !/^[a-z0-9-]+\.email\.stripe\.com$/i.test(parsed.hostname)) return url;
     const m = parsed.pathname.match(/^\/CL\d+\/(.+?)\/\d+\/[^/]+\/[^/]*$/);
     if (!m) return url;
-    const target = decodeURIComponent(m[1]);
-    return /^https:\/\//i.test(target) ? target : url;
+    const decoded = decodeURIComponent(m[1]);
+    if (!/^https:\/\//i.test(decoded)) return url;
+    const target = new URL(decoded);
+    return target.protocol === 'https:' ? target.href : url;
   } catch {
     return url;
   }
@@ -522,6 +587,7 @@ function hasPdfPath(pathname) {
  * unwrapped; image assets (css url(), img src, image extensions) are dropped; a
  * link must have a pdf path segment or .pdf suffix. There is deliberately no
  * "first allowlisted URL" fallback: logos and other assets share those hosts.
+ * Every returned url is a normalised https href of at most MAX_URL_LENGTH characters.
  * kind: 0 = invoice PDF, 1 = other PDF, 2 = receipt PDF.
  */
 function collectPdfLinks(html, allowlist) {
@@ -538,9 +604,11 @@ function collectPdfLinks(html, allowlist) {
     }
     if (parsed.protocol !== 'https:' || !allowlist.includes(parsed.hostname.toLowerCase())) continue;
     if (IMAGE_EXT_RE.test(parsed.pathname) || !hasPdfPath(parsed.pathname)) continue;
+    const url = parsed.href;
+    if (url.length > MAX_URL_LENGTH) continue;
     const path = parsed.pathname.toLowerCase();
     const kind = /\/receipts?\b/.test(path) ? 2 : /\/invoices?\b/.test(path) ? 0 : 1;
-    if (!links.some(l => l.url === target)) links.push({ url: target, kind });
+    if (!links.some(l => l.url === url)) links.push({ url, kind });
   }
   return links;
 }
@@ -575,19 +643,21 @@ export function selectPdfAttachment(attachments, prefer = 'invoice') {
 const STRING_CAP = 300;
 const ELLIPSIS = '…'; // …
 
-function capStr(s) {
+/** Cap a parsed string at STRING_CAP characters (plus an ellipsis); non-strings pass through. */
+export function capStr(s) {
   if (typeof s !== 'string' || s.length <= STRING_CAP) return s;
   return s.slice(0, STRING_CAP) + ELLIPSIS;
 }
 
-// FR-3 size budget: everything except billingPdfUrl/receiptPdfUrl must fit in 4096 bytes.
-// Those two are exempt — they are fetched verbatim by the FR-2 link fallback;
-// truncating one corrupts pre-signed Stripe URLs (fixed in commit 57d78df).
+// Size budget: everything except billingPdfUrl/receiptPdfUrl must fit in 4096 bytes.
+// Those two are exempt — they are fetched verbatim by the PDF link fallback, and
+// truncating one corrupts a pre-signed URL — but each is at most MAX_URL_LENGTH
+// characters (longer links are dropped in collectPdfLinks, never truncated).
 const SIZE_BUDGET = 4096;
 
 export function parseReceiptMessage(message, attachments = [], allowlist = [], rules = { vendorSenders: [], productLabels: [] }) {
   const html = message.body?.content || '';
-  const text = message.body?.contentType?.toLowerCase() === 'html' ? stripHtml(html) : html;
+  const text = capParseText(message.body?.contentType?.toLowerCase() === 'html' ? stripHtml(html) : html);
   const fromAddress = message.from?.emailAddress?.address || '';
   const subject = message.subject || '';
   const { amounts, lineItems } = parseReceiptTotals(text);
@@ -616,11 +686,12 @@ export function parseReceiptMessage(message, attachments = [], allowlist = [], r
     attachmentIds: nonInline.map(a => a.id).slice(0, 20)
   };
 
-  // Overall size guard (FR-3): trim lineItems, then attachmentIds (re-fetchable via
+  // Overall size guard: trim lineItems, then attachmentIds (re-fetchable via
   // Graph), until the result excluding the two URLs fits within SIZE_BUDGET bytes.
   // truncated is scoped to these guards only (capStr truncations are not tracked).
   const sizeOf = () => JSON.stringify({ ...result, billingPdfUrl: undefined, receiptPdfUrl: undefined }).length;
   if (sizeOf() > SIZE_BUDGET) {
+    result.truncated = true; // set first so the flag itself counts against the budget
     while (result.lineItems.length > 0 && sizeOf() > SIZE_BUDGET) {
       result.lineItems.pop();
     }
@@ -630,7 +701,6 @@ export function parseReceiptMessage(message, attachments = [], allowlist = [], r
     if (sizeOf() > SIZE_BUDGET) {
       result.attachmentIds = []; // pathological: drop all
     }
-    result.truncated = true;
   }
 
   return result;
