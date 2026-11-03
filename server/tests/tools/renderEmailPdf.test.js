@@ -45,6 +45,51 @@ describe('renderEmailPdfCore (FR-3/FR-7)', () => {
     expect(result.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(renderImpl).toHaveBeenCalledOnce();
   });
+
+  describe('re-rendering the same email under onExisting skip', () => {
+    const message = (html) => ({
+      id: 'm1',
+      subject: 'Hooli Store receipt',
+      from: { emailAddress: { address: 'store-noreply@hooli.example' } },
+      receivedDateTime: '2026-06-09T10:00:00Z',
+      body: { contentType: 'html', content: html }
+    });
+    // Chrome stamps each rendering with its creation time.
+    const stampedRender = () => {
+      let stamp = 0;
+      return vi.fn().mockImplementation(async (doc) => {
+        stamp++;
+        return Buffer.from(`%PDF-1.4\n<< /CreationDate (D:2026060912000${stamp}Z) /ModDate (D:2026060912000${stamp}Z) >>\n${doc}`);
+      });
+    };
+    const args = { messageId: 'm1', fileName: 'Hooli 09Jun26 Invoice.pdf' };
+
+    it('skips the earlier rendering when only the render timestamps differ', async () => {
+      makeRequest.mockResolvedValue(message('<p>Total $14.99</p>'));
+      const renderImpl = stampedRender();
+
+      const first = await renderEmailPdfCore(graphApiClient, args, { renderImpl });
+      const second = await renderEmailPdfCore(graphApiClient, args, { renderImpl });
+      const third = await renderEmailPdfCore(graphApiClient, args, { renderImpl });
+
+      expect(first.action).toBe('saved');
+      for (const again of [second, third]) {
+        expect(again).toMatchObject({ action: 'skipped', savedPath: first.savedPath, sha256: first.sha256, method: 'rendered' });
+      }
+      expect(fs.readdirSync(receiptsDir)).toEqual(['Hooli 09Jun26 Invoice.pdf']);
+    });
+
+    it('keeps a rendering of changed content as a new version', async () => {
+      const renderImpl = stampedRender();
+      makeRequest.mockResolvedValueOnce(message('<p>Total $14.99</p>'));
+      await renderEmailPdfCore(graphApiClient, args, { renderImpl });
+      makeRequest.mockResolvedValueOnce(message('<p>Total $19.99</p>'));
+      const changed = await renderEmailPdfCore(graphApiClient, args, { renderImpl });
+
+      expect(changed).toMatchObject({ action: 'versioned', existingDiffers: true });
+      expect(fs.readdirSync(receiptsDir).sort()).toEqual(['Hooli 09Jun26 Invoice (2).pdf', 'Hooli 09Jun26 Invoice.pdf']);
+    });
+  });
 });
 
 describe('renderEmailPdfTool (tool-wrapper deps threading)', () => {

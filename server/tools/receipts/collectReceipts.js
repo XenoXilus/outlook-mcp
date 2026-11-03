@@ -15,17 +15,20 @@
  * becomes an `ambiguous` entry. A message every claiming rule rejects by product
  * is listed in unmatched[].
  *
- * Saving: copies of one receipt (sharing a receipt, invoice or order number and
- * never disagreeing on a known total) collapse to one representative and the
- * rest are `duplicate`. The representative's PDF comes from its attachment,
- * else a per-receipt allowlisted link, else a rendering of the email. Names that
- * collide within the run carry the receipt's own number. A formal source that
- * fails is `fetch_failed` (also listed in failed[]) and gets a rendered copy that
- * is never presented as the invoice. Amounts prefer the saved PDF's labelled
- * total over the email body.
+ * Saving: copies of one receipt (sharing a receipt, invoice or order number,
+ * with no two different numbers of one kind and no two different known totals
+ * across the group) collapse to one representative and the rest are
+ * `duplicate`. The representative's PDF comes from its attachment, else a
+ * per-receipt allowlisted link, else a rendering of the email. Names that
+ * collide within the run carry the receipt's own number (ordinals, oldest
+ * first, for receipts without one), and a receipt already saved under the
+ * plain name by an earlier run keeps that file. A formal source that fails is
+ * `fetch_failed` (also listed in failed[]) and gets a rendered copy that is
+ * never presented as the invoice. Amounts prefer the saved PDF's labelled
+ * total over the email body, except a PDF total of zero.
  *
  * Idempotent under re-runs (onExisting: 'skip' only skips a file holding the
- * same bytes); one structured log line per outcome.
+ * same document); one structured log line per outcome.
  */
 
 import fs from 'fs';
@@ -39,6 +42,7 @@ import {
   resolveDestination,
   sanitiseFilename,
   existingVersionPaths,
+  findSameDocument,
   sha256Hex
 } from '../../utils/receiptFiles.js';
 import { fetchAttachmentContent } from '../../graph/attachmentContent.js';
@@ -47,7 +51,6 @@ import { extractReceiptCore } from './extractReceipt.js';
 import { saveAttachmentCore } from './saveAttachment.js';
 import { fetchBillingPdfCore } from './fetchBillingPdf.js';
 import { renderEmailPdfCore } from './renderEmailPdf.js';
-import { renderHtmlToPdfBuffer } from './htmlToPdf.js';
 import { parseReceiptPdf } from './receiptPdfText.js';
 import { normaliseSubject, selectPdfAttachment } from './receiptParser.js';
 
@@ -67,6 +70,9 @@ const NUMBER_KINDS = ['receiptNumber', 'invoiceNumber', 'orderNumber'];
 const MONEY_FIELDS = ['amount', 'currency', 'taxAmount', 'amounts', 'amountSource', 'amountMismatch', 'currencyMismatch'];
 // Save actions meaning this run wrote a new file (so removing it loses nothing).
 const CREATED_ACTIONS = new Set(['saved', 'versioned']);
+const MB = 1024 * 1024;
+// Largest PDF attachment downloaded just to read its product before claiming.
+const MAX_PRODUCT_PDF_BYTES = 15 * MB;
 const PRODUCT_UNKNOWN_REASON =
   'product could not be determined (no product label or line items), so productContains/productExcludes cannot decide which rule it belongs to';
 
@@ -282,18 +288,26 @@ function numbersOf(receipt) {
   return numbers;
 }
 
-/** True when both carry a number of the same kind and the numbers differ. */
-function numbersConflict(a, b) {
-  const x = numbersOf(a);
-  const y = numbersOf(b);
-  return NUMBER_KINDS.some(kind => x[kind] && y[kind] && x[kind] !== y[kind]);
-}
-
 /** True when two known totals cannot belong to the same charge. */
 function totalsDiffer(a, b) {
   if (typeof a.amount !== 'number' || typeof b.amount !== 'number') return false;
   if (Math.abs(a.amount - b.amount) > 0.005) return true;
   return Boolean(a.currency && b.currency && a.currency !== b.currency);
+}
+
+/**
+ * True when all `records` (receipts or manifest entries) can be copies of one
+ * receipt: no receipt, invoice or order number has two different values among
+ * them and no two known totals differ. Checked over the whole resulting group,
+ * so a copy carrying fewer details (a reply with only the order number, an
+ * entry with no number) can never bridge two distinct charges.
+ */
+function canBeOneReceipt(records) {
+  const numbers = records.map(numbersOf);
+  for (const kind of NUMBER_KINDS) {
+    if (new Set(numbers.map(n => n[kind]).filter(Boolean)).size > 1) return false;
+  }
+  return records.every((a, i) => records.slice(i + 1).every(b => !totalsDiffer(a, b)));
 }
 
 function formatTotal(receipt) {
@@ -302,9 +316,10 @@ function formatTotal(receipt) {
 
 /**
  * Group copies of one receipt within each rule: members share a receipt,
- * invoice or order number and never disagree on a known total (two charges on
- * one order are two receipts). A receipt number shared by different totals
- * leaves a numberConflict note on both sides.
+ * invoice or order number, and the group as a whole never holds two different
+ * numbers of one kind or two different known totals (two charges on one order
+ * are two receipts). A receipt number shared by different totals leaves a
+ * numberConflict note on both sides.
  */
 function groupCopies(owned) {
   const groups = [];
@@ -315,6 +330,7 @@ function groupCopies(owned) {
       `(${formatTotal(other.receipt)} vs ${formatTotal(item.receipt)}); kept as separate receipts`
     );
   };
+  const receiptsOf = (members) => members.map(m => m.receipt);
   for (const item of owned) {
     item.numbers = numbersOf(item.receipt);
     item.numberConflicts = item.numberConflicts || [];
@@ -324,24 +340,24 @@ function groupCopies(owned) {
       const shares = NUMBER_KINDS.some(kind =>
         item.numbers[kind] && group.members.some(m => m.numbers[kind] === item.numbers[kind]));
       if (!shares) continue;
-      const clashing = group.members.filter(m => totalsDiffer(m.receipt, item.receipt));
-      if (clashing.length > 0) {
-        for (const other of clashing) {
-          if (!item.numbers.receiptNumber || other.numbers.receiptNumber !== item.numbers.receiptNumber) continue;
-          noteConflict(item, other);
-          noteConflict(other, item);
+      // Once the item has a group, a second group it shares a number with is
+      // merged into it, again only if the result can still be one receipt.
+      if (canBeOneReceipt(receiptsOf(home ? [...home.members, ...group.members] : [...group.members, item]))) {
+        if (home) {
+          home.members.push(...group.members);
+          groups.splice(groups.indexOf(group), 1);
+        } else {
+          home = group;
+          group.members.push(item);
         }
         continue;
       }
-      if (!home) {
-        home = group;
-        group.members.push(item);
-        continue;
+      for (const other of group.members) {
+        if (!item.numbers.receiptNumber || other.numbers.receiptNumber !== item.numbers.receiptNumber) continue;
+        if (!totalsDiffer(other.receipt, item.receipt)) continue;
+        noteConflict(item, other);
+        noteConflict(other, item);
       }
-      // The item links two groups: merge them unless their known totals disagree.
-      if (group.members.some(m => home.members.some(h => totalsDiffer(m.receipt, h.receipt)))) continue;
-      home.members.push(...group.members);
-      groups.splice(groups.indexOf(group), 1);
     }
     if (!home) groups.push({ ruleIndex: item.ruleIndex, members: [item] });
   }
@@ -355,12 +371,20 @@ function duplicateLabel(item, representative) {
   return `${kind}:${representative.receipt[kind].trim()}`;
 }
 
+function receivedTime(item) {
+  const t = Date.parse(item.message.receivedDateTime);
+  return Number.isNaN(t) ? Infinity : t;
+}
+
 /**
  * One file name per representative, from the rule's template. Receipts whose
  * names collide in this run (one vendor, one day) are told apart by their own
  * receipt/invoice/order number (the first kind unique among them), so a re-run
  * maps each receipt to the same file whatever else arrived meanwhile; an
- * ordinal "(2)" is the last resort for receipts that carry no number.
+ * ordinal "(2)" is the last resort for receipts that carry no number, given
+ * oldest first so a later arrival never takes an earlier receipt's name.
+ * `plain` keeps the template name, under which an earlier run may have saved
+ * the receipt before it had a same-day sibling.
  */
 function assignFileNames(representatives, vendors, usedNames) {
   const names = new Map();
@@ -372,7 +396,7 @@ function assignFileNames(representatives, vendors, usedNames) {
         vendor: rule.vendor,
         date: item.message.receivedDateTime
       });
-      names.set(item, { base });
+      names.set(item, { base, plain: base });
       const key = base.toLowerCase();
       if (!byName.has(key)) byName.set(key, []);
       byName.get(key).push(item);
@@ -389,7 +413,8 @@ function assignFileNames(representatives, vendors, usedNames) {
       if (kind) names.get(item).base = withSuffix(names.get(item).base, ` ${fileNameToken(item.receipt[kind])}`);
     }
   }
-  for (const item of representatives) {
+  // Stable sort: same-time receipts keep their order.
+  for (const item of [...representatives].sort((a, b) => receivedTime(a) - receivedTime(b))) {
     const naming = names.get(item);
     if (naming.base) naming.fileName = dedupeFilename(naming.base, usedNames);
   }
@@ -455,7 +480,10 @@ async function applyPdfAmounts(entry, saved, rules, parsePdf = parseReceiptPdf) 
   if (pdfTotal !== null && bodyTotal !== null && Math.abs(bodyTotal - pdfTotal) > 0.005) {
     entry.amountMismatch = { body: bodyTotal, pdf: pdfTotal };
   }
-  if (pdfTotal !== null && !(guessed && bodyTotal !== null)) {
+  // A PDF total of zero ("Balance due $0.00") is what is left to pay, not the
+  // charge, so it never replaces a positive email total.
+  const zeroOverCharge = pdfTotal !== null && Math.abs(pdfTotal) <= 0.005 && bodyTotal !== null && bodyTotal > 0.005;
+  if (pdfTotal !== null && !(guessed && bodyTotal !== null) && !zeroOverCharge) {
     entry.amount = pdfTotal;
     entry.currency = pdf.amounts.currency || entry.currency;
     entry.taxAmount = pdf.amounts.tax ?? null;
@@ -502,6 +530,11 @@ async function pdfProduct(ctx, prefer) {
     }
     const pdf = selectPdfAttachment(ctx.attachments, prefer);
     if (!pdf) throw new Error('no PDF attachment found');
+    // Read before the message is known to belong to any rule, so it is bounded
+    // by the size Graph lists rather than downloaded whatever its size.
+    if (typeof pdf.size === 'number' && pdf.size > MAX_PRODUCT_PDF_BYTES) {
+      throw new Error(`PDF attachment is too large to read for its product (${(pdf.size / MB).toFixed(1)} MB > 15 MB)`);
+    }
     const { buffer } = await fetchAttachmentContent(
       ctx.graphApiClient, ctx.base, ctx.messageId, pdf.id, { attachmentName: pdf.name }
     );
@@ -515,38 +548,23 @@ async function pdfProduct(ctx, prefer) {
   return result;
 }
 
-const PDF_TIMESTAMPS = /\/(CreationDate|ModDate)\s*\(D:[^)]*\)/g;
-
-function withoutPdfTimestamps(buffer) {
-  return buffer.toString('latin1').replace(PDF_TIMESTAMPS, '/$1()');
-}
-
 /**
- * Chrome stamps every rendering with its creation time, so rendering the same
- * email twice never gives identical bytes. Under onExisting 'skip' an earlier
- * rendering at this name that differs only in those timestamps is handed back
- * in place of the fresh one, so a re-run skips it instead of adding a version.
+ * A receipt whose file name gained a number or ordinal since an earlier run
+ * (it now has a same-day sibling) may already be on disk under the plain
+ * template name or one of its numbered versions. When the file just created
+ * holds the same document as one of those (identical bytes, or a PDF differing
+ * only in its render timestamps), the new file is removed and the existing one
+ * is reported as skipped, so a re-run never keeps two copies of one receipt.
+ * Files already reported for another receipt in this run are never reused.
  */
-function renderDeps(deps, destDir, fileName, onExisting) {
-  if (onExisting !== 'skip') return deps;
-  const render = deps.renderImpl || renderHtmlToPdfBuffer;
-  return {
-    ...deps,
-    renderImpl: async (doc) => {
-      const fresh = await render(doc);
-      if (!Buffer.isBuffer(fresh)) return fresh;
-      try {
-        const stable = withoutPdfTimestamps(fresh);
-        for (const candidate of existingVersionPaths(destDir, fileName)) {
-          const existing = await fs.promises.readFile(candidate);
-          if (withoutPdfTimestamps(existing) === stable) return existing;
-        }
-      } catch {
-        // Comparison is best-effort: the fresh rendering is saved under the normal policy.
-      }
-      return fresh;
-    }
-  };
+async function reuseEarlierName(saved, destDir, plainName, claimedPaths) {
+  const candidates = existingVersionPaths(destDir, plainName)
+    .filter(p => p !== saved.savedPath && !claimedPaths.has(p));
+  if (candidates.length === 0) return saved;
+  const match = await findSameDocument(await fs.promises.readFile(saved.savedPath), candidates);
+  if (!match) return saved;
+  await fs.promises.rm(saved.savedPath, { force: true });
+  return { ...saved, savedPath: match.path, action: 'skipped', sha256: match.sha256, size: match.size };
 }
 
 async function searchMessages(graphApiClient, base, filters) {
@@ -595,21 +613,22 @@ async function hasInvoiceAttachment(graphApiClient, base, messageId) {
 
 /**
  * Representative of a group of copies: one with an Invoice-*.pdf attachment,
- * else any PDF attachment, else none; ties go to the earliest received.
+ * else any PDF attachment, else none; ties go to the earliest received. A copy
+ * with no known total (e.g. a reply quoting only the order number) is never
+ * chosen over a member that carries both a PDF and the total: the copy's own
+ * attachment may belong to another charge.
  */
 async function chooseRepresentative(members, graphApiClient, base) {
-  const rank = new Map(members.map(m => [m, m.receipt.hasPdfAttachment ? 1 : 0]));
-  const withPdf = members.filter(m => m.receipt.hasPdfAttachment);
+  const hasTotal = (m) => typeof m.receipt.amount === 'number';
+  const pool = members.some(m => m.receipt.hasPdfAttachment && hasTotal(m)) ? members.filter(hasTotal) : members;
+  const rank = new Map(pool.map(m => [m, m.receipt.hasPdfAttachment ? 1 : 0]));
+  const withPdf = pool.filter(m => m.receipt.hasPdfAttachment);
   if (withPdf.length > 1) {
     for (const m of withPdf) {
       if (await hasInvoiceAttachment(graphApiClient, base, m.message.id)) rank.set(m, 2);
     }
   }
-  const time = (m) => {
-    const t = Date.parse(m.message.receivedDateTime);
-    return Number.isNaN(t) ? Infinity : t;
-  };
-  return [...members].sort((a, b) => rank.get(b) - rank.get(a) || time(a) - time(b))[0];
+  return [...pool].sort((a, b) => rank.get(b) - rank.get(a) || receivedTime(a) - receivedTime(b))[0];
 }
 
 export async function collectReceiptsTool(authManager, args, deps = {}) {
@@ -880,6 +899,8 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
 
     // --- Save -------------------------------------------------------------
     const saveOrder = [];
+    // Files already reported for a receipt in this run.
+    const claimedPaths = new Set();
     for (const item of owned) {
       const { message, receipt } = item;
       const { rule, searchNote } = states[item.ruleIndex];
@@ -928,41 +949,53 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
         const naming = fileNames.get(item);
         if (naming.error) throw naming.error;
         fileName = naming.fileName;
+        const reuse = async (result) => {
+          if (onExisting !== 'skip' || !CREATED_ACTIONS.has(result.action) ||
+              naming.plain.toLowerCase() === fileName.toLowerCase()) return result;
+          try {
+            return await reuseEarlierName(result, destDir, naming.plain, claimedPaths);
+          } catch (error) {
+            // Best-effort: the receipt keeps the file just written under its new name.
+            logCollectEvent({ vendor: rule.vendor, stage: 'reuse-name', outcome: 'error', messageId: message.id, error: error.message });
+            return result;
+          }
+        };
 
         if (formal === 'attachment') {
-          saved = await saveAttachmentCore(graphApiClient, {
+          saved = await reuse(await saveAttachmentCore(graphApiClient, {
             messageId: message.id,
             prefer: rule.prefer || 'invoice',
             destDir,
             fileName,
             onExisting,
             mailbox
-          }, rules);
+          }, rules));
           recordSaved(entry, saved, 'attachment', true);
           entry.attachmentId = saved.attachmentId;
           entry.attachmentName = saved.attachmentName;
           await applyPdfAmounts(entry, saved, rules, parsePdf);
         } else if (formal === 'link') {
-          saved = await fetchBillingPdfCore(graphApiClient, {
+          saved = await reuse(await fetchBillingPdfCore(graphApiClient, {
             url: receipt.billingPdfUrl,
             destDir,
             fileName,
             onExisting,
             mailbox
-          }, deps);
+          }, deps));
           recordSaved(entry, saved, 'link', true);
           await applyPdfAmounts(entry, saved, rules, parsePdf);
         } else {
-          saved = await renderEmailPdfCore(graphApiClient, {
+          saved = await reuse(await renderEmailPdfCore(graphApiClient, {
             messageId: message.id,
             destDir,
             fileName,
             onExisting,
             mailbox
-          }, renderDeps(deps, destDir, fileName, onExisting));
+          }, deps));
           recordSaved(entry, saved, 'rendered', false);
           entry.amountSource = 'body';
         }
+        claimedPaths.add(saved.savedPath);
         saveOrder.push(entry);
         logCollectEvent({
           vendor: rule.vendor, stage: 'save', status: entry.status, outcome: entry.action,
@@ -999,7 +1032,8 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
               fileName: renderedName,
               onExisting,
               mailbox
-            }, renderDeps(deps, destDir, renderedName, onExisting));
+            }, deps);
+            claimedPaths.add(rendered.savedPath);
             entry.renderedFallback = {
               savedPath: rendered.savedPath,
               sha256: rendered.sha256,
@@ -1033,19 +1067,25 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
     }
 
     // --- Identical files saved for different messages ----------------------
-    // Identical bytes mean one receipt only when the entries' receipt/invoice/
-    // order numbers do not contradict each other: a vendor may reuse one PDF
-    // for distinct receipts, and those are kept (sameFileAs names the other).
-    const keptBySha = new Map();
+    // Identical bytes mean one receipt only when the entries could be one
+    // receipt by the same rule as copies (no two different numbers of a kind,
+    // no two different known totals across the whole group): a vendor may
+    // reuse one PDF for distinct receipts, and those are kept (sameFileAs
+    // names the other). Each group's first entry is the one kept.
+    const groupsBySha = new Map();
+    // Numbers and total as saved: a duplicate's money fields are removed below.
+    const facts = (e) => ({ ...Object.fromEntries(NUMBER_KINDS.map(k => [k, e[k]])), amount: e.amount, currency: e.currency });
     for (const entry of saveOrder) {
       if (!entry.sha256 || (entry.status !== 'saved' && entry.status !== 'skipped')) continue;
-      const kept = keptBySha.get(entry.sha256) || [];
-      const first = kept.find(other => !numbersConflict(other, entry));
-      if (!first) {
-        if (kept.length > 0) entry.sameFileAs = kept[0].sourceMessageId;
-        keptBySha.set(entry.sha256, [...kept, entry]);
+      const shaGroups = groupsBySha.get(entry.sha256) || [];
+      const home = shaGroups.find(g => canBeOneReceipt([...g.members, facts(entry)]));
+      if (!home) {
+        if (shaGroups.length > 0) entry.sameFileAs = shaGroups[0].first.sourceMessageId;
+        groupsBySha.set(entry.sha256, [...shaGroups, { first: entry, members: [facts(entry)] }]);
         continue;
       }
+      home.members.push(facts(entry));
+      const { first } = home;
       // Only a file this run created is removed; a pre-existing one is left alone.
       if (CREATED_ACTIONS.has(entry.action) && entry.savedPath !== first.savedPath) {
         try {

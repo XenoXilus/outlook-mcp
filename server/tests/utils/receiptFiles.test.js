@@ -173,4 +173,75 @@ describe('receiptFiles', () => {
     await saveReceiptFile(PDF, receiptsDir, 'x.pdf');
     expect(fs.readdirSync(receiptsDir).filter(f => f.startsWith('.tmp-'))).toHaveLength(0);
   });
+
+  describe('PDF creation/modification timestamps', () => {
+    const stamped = (stamp, body = 'same receipt body') => Buffer.from(
+      `%PDF-1.4\n1 0 obj\n<< /Producer (Renderer) /CreationDate (D:20260601120000${stamp}+00'00') ` +
+      `/ModDate (D:20260601120000${stamp}+00'00') >>\nendobj\n${body}\n%%EOF\n`, 'latin1'
+    );
+
+    it('onExisting=skip treats a PDF differing only in CreationDate/ModDate as the same file', async () => {
+      const first = await saveReceiptFile(stamped('1'), receiptsDir, 'x.pdf');
+      const again = await saveReceiptFile(stamped('2'), receiptsDir, 'x.pdf');
+
+      expect(again).toMatchObject({ action: 'skipped', savedPath: first.savedPath, sha256: first.sha256, size: first.size });
+      expect(again.existingDiffers).toBeUndefined();
+      expect(fs.readdirSync(receiptsDir)).toEqual(['x.pdf']);
+      expect(fs.readFileSync(first.savedPath).equals(stamped('1'))).toBe(true); // the earlier file is untouched
+    });
+
+    it('still versions a PDF whose content differs, whatever its timestamps', async () => {
+      await saveReceiptFile(stamped('1'), receiptsDir, 'x.pdf');
+      const other = await saveReceiptFile(stamped('2', 'another receipt body'), receiptsDir, 'x.pdf');
+      const sameStamp = await saveReceiptFile(stamped('1', 'a third receipt body'), receiptsDir, 'x.pdf');
+
+      expect(other).toMatchObject({ action: 'versioned', existingDiffers: true });
+      expect(sameStamp).toMatchObject({ action: 'versioned', existingDiffers: true });
+      expect(fs.readdirSync(receiptsDir).sort()).toEqual(['x (2).pdf', 'x (3).pdf', 'x.pdf']);
+    });
+
+    it('compares files that are not PDFs byte for byte', async () => {
+      const text = (stamp) => Buffer.from(`/CreationDate (D:2026060112000${stamp})\n`);
+      await saveReceiptFile(text('1'), receiptsDir, 'x.txt');
+      const res = await saveReceiptFile(text('2'), receiptsDir, 'x.txt');
+      expect(res).toMatchObject({ action: 'versioned', existingDiffers: true });
+    });
+  });
+
+  describe('concurrent saves to one name', () => {
+    it('never reports two different files as saved at the same path', async () => {
+      const a = Buffer.from('%PDF-1.4 receipt A');
+      const b = Buffer.from('%PDF-1.4 receipt B');
+      const results = await Promise.all([
+        saveReceiptFile(a, receiptsDir, 'x.pdf'),
+        saveReceiptFile(b, receiptsDir, 'x.pdf')
+      ]);
+
+      expect(new Set(results.map(r => r.savedPath)).size).toBe(2);
+      expect(fs.readFileSync(results[0].savedPath).equals(a)).toBe(true);
+      expect(fs.readFileSync(results[1].savedPath).equals(b)).toBe(true);
+      expect(results.map(r => r.action).sort()).toEqual(['saved', 'versioned']);
+      expect(fs.readdirSync(receiptsDir).sort()).toEqual(['x (2).pdf', 'x.pdf']);
+    });
+
+    it('writes identical bytes once and reports the other save as skipped', async () => {
+      const results = await Promise.all([
+        saveReceiptFile(PDF, receiptsDir, 'x.pdf'),
+        saveReceiptFile(Buffer.from(PDF), receiptsDir, 'x.pdf')
+      ]);
+
+      expect(results.map(r => r.action).sort()).toEqual(['saved', 'skipped']);
+      expect(results[0].savedPath).toBe(results[1].savedPath);
+      expect(fs.readdirSync(receiptsDir)).toEqual(['x.pdf']);
+    });
+
+    it('applies onExisting=version to a name taken by a concurrent save', async () => {
+      const results = await Promise.all([
+        saveReceiptFile(PDF, receiptsDir, 'x.pdf', { onExisting: 'version' }),
+        saveReceiptFile(PDF, receiptsDir, 'x.pdf', { onExisting: 'version' })
+      ]);
+      expect(results.map(r => path.basename(r.savedPath)).sort()).toEqual(['x (2).pdf', 'x.pdf']);
+      expect(fs.readdirSync(receiptsDir).filter(f => f.startsWith('.tmp-'))).toHaveLength(0);
+    });
+  });
 });
