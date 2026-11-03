@@ -109,7 +109,7 @@ process.on('uncaughtException', (error) => {
       getSharePointFileTool,
       listSharePointFilesTool,
       resolveSharePointLinkTool,
-      // Receipt/Invoice-run Tools
+      // Receipt & invoice tools
       saveAttachmentTool,
       fetchBillingPdfTool,
       extractReceiptTool,
