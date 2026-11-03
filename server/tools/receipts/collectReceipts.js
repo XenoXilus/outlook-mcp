@@ -125,15 +125,25 @@ function escapeODataString(value) {
   return String(value).replace(/'/g, "''");
 }
 
-/**
- * Lower-case an address and strip any plus tag from the local part, so
- * billing+statements+acct_1@example.com and billing@example.com compare equal.
- */
-function normaliseEmailAddress(address) {
+function splitAddress(address) {
   const lower = String(address || '').toLowerCase().trim();
   const at = lower.lastIndexOf('@');
-  if (at === -1) return lower;
-  return `${lower.slice(0, at).split('+')[0]}@${lower.slice(at + 1)}`;
+  return at === -1 ? { local: lower, domain: '' } : { local: lower.slice(0, at), domain: lower.slice(at + 1) };
+}
+
+/**
+ * True when `address` is the rule's sender with extra plus tags appended, so a
+ * rule for billing@example.com still matches billing+statements+acct_1@example.com.
+ * Tags already present in the rule must match: payment processors send every
+ * merchant's receipts from one mailbox and tell them apart only by the tag
+ * (billing+statements+acct_A@ vs billing+statements+acct_B@), so stripping all
+ * tags would make each merchant's rule claim the other's receipts.
+ */
+function isPlusExtensionOf(address, ruleFrom) {
+  const sender = splitAddress(address);
+  const rule = splitAddress(ruleFrom);
+  if (!sender.local || !rule.local || sender.domain !== rule.domain) return false;
+  return sender.local === rule.local || sender.local.startsWith(`${rule.local}+`);
 }
 
 function senderOf(message) {
@@ -203,7 +213,7 @@ function headerSignals(rule, message) {
   if (rule.from) {
     if (fromAddress === rule.from.toLowerCase()) {
       matched.push('from');
-    } else if (normaliseEmailAddress(fromAddress) === normaliseEmailAddress(rule.from)) {
+    } else if (isPlusExtensionOf(fromAddress, rule.from)) {
       matched.push('from-normalised');
     }
   }
@@ -396,7 +406,7 @@ function senderFields(rule, message, receipt) {
   const fields = {
     sender,
     forwarded: replyOrForward ||
-      Boolean(rule?.from && normaliseEmailAddress(sender) !== normaliseEmailAddress(rule.from))
+      Boolean(rule?.from && !isPlusExtensionOf(sender, rule.from))
   };
   if (receipt?.quotedFrom?.address) fields.originalSender = receipt.quotedFrom.address;
   if (receipt?.quotedFrom?.name) fields.originalSenderName = receipt.quotedFrom.name;
@@ -685,16 +695,16 @@ export async function collectReceiptsTool(authManager, args, deps = {}) {
         continue;
       }
 
-      // Zero hits with a from rule: retry on the plus-stripped local part and
-      // keep only messages whose normalised sender really is the rule's sender.
+      // Zero hits with a from rule: retry on the rule's local part as a prefix
+      // and keep only senders that are the rule's address plus extra tags.
       if (messages.length === 0 && rule.from) {
         try {
-          const localBase = normaliseEmailAddress(rule.from).split('@')[0];
+          const localBase = splitAddress(rule.from).local;
           const retried = await searchMessages(graphApiClient, base, [
             ...dateFilters,
             `startswith(from/emailAddress/address,'${escapeODataString(localBase)}')`
           ]);
-          messages = retried.filter(m => normaliseEmailAddress(senderOf(m)) === normaliseEmailAddress(rule.from));
+          messages = retried.filter(m => isPlusExtensionOf(senderOf(m), rule.from));
           if (messages.length > 0) {
             state.searchNote = `matched via plus-address-normalised sender fallback (exact from '${rule.from}' found nothing)`;
             logCollectEvent({ vendor: rule.vendor, stage: 'search', outcome: 'fallback-match', count: messages.length });

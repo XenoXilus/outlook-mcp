@@ -652,6 +652,40 @@ describe('collectReceiptsTool (FR-6)', () => {
       expect(out.notes).toEqual([]);
     });
 
+    describe('merchants sharing one payment-processor mailbox', () => {
+      // Processors send every merchant's receipts from one address and tell
+      // them apart only by the plus tag.
+      const merchant = (id, tag, name, number) => receiptMessage({
+        id, date: '2026-06-18T09:00:00Z', from: `invoice+statements+${tag}@processor.example`,
+        subject: `Your receipt from ${name} #${number}`,
+        html: `<p>Receipt number ${number}</p><p>Amount paid $20.00</p>`,
+        attachments: [pdfAttachment(`att-${id}`, `Invoice-${number}.pdf`)], content: { [`att-${id}`]: PDF_B64 }
+      });
+      const rules = [
+        { vendor: 'Acme', from: 'invoice+statements+acct_aaa@processor.example', subjectContains: 'receipt from Acme' },
+        { vendor: 'Globex', from: 'invoice+statements+acct_bbb@processor.example', subjectContains: 'receipt from Globex' }
+      ];
+      const acme = merchant('m-acme', 'acct_aaa', 'Acme Corp', '1111-0001');
+      const globex = merchant('m-globex', 'acct_bbb', 'Globex Ltd', '2222-0002');
+
+      it('keeps each merchant\'s receipt with its own rule instead of making both ambiguous', async () => {
+        const out = await run(rules, { messages: [acme, globex] });
+        const owner = (id) => out.manifest.find(e => e.sourceMessageId === id);
+        expect(owner('m-acme')).toMatchObject({ vendor: 'Acme', status: 'saved' });
+        expect(owner('m-globex')).toMatchObject({ vendor: 'Globex', status: 'saved' });
+        expect(out.summary.ambiguous).toBe(0);
+        expect(owner('m-acme').forwarded).toBe(false);
+      });
+
+      it('does not hand another merchant\'s receipt to a rule with no receipt this month', async () => {
+        const out = await run(rules, { messages: [globex] });
+        expect(out.manifest.find(e => e.vendor === 'Acme').status).toBe('not_found');
+        expect(out.manifest.find(e => e.sourceMessageId === 'm-globex')).toMatchObject({ vendor: 'Globex', status: 'saved' });
+        expect(out.missing).toEqual(['Acme']);
+        expect(out.summary.ambiguous).toBe(0);
+      });
+    });
+
     it('turns a failed vendor search into fetch_failed with the Graph error, listed in failed[]', async () => {
       const out = await run(
         [{ vendor: 'Globex', from: 'billing@globex.example' }],
