@@ -62,7 +62,7 @@ export const downloadAttachmentSchema = {
       onExisting: {
         type: 'string',
         enum: ['skip', 'overwrite', 'version'],
-        description: 'What to do when the target file already exists (saveToFile mode)',
+        description: 'What to do when the target file already exists (saveToFile mode): skip keeps it only if it holds identical bytes, otherwise a new version is written and existingDiffers is set',
         default: 'skip',
       },
       ...mailboxProperty,

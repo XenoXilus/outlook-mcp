@@ -20,7 +20,7 @@ export const saveAttachmentSchema = {
       fileName: { type: 'string', description: 'Explicit target filename, e.g. "Acme 29Jun26 Invoice.pdf". Takes priority over filenameTemplate. Defaults to the attachment\'s own name when neither fileName nor filenameTemplate/vendor is supplied.' },
       filenameTemplate: { type: 'string', description: 'Template for the saved filename, e.g. "{vendor} {DDMmmYY} Invoice.pdf". Overrides RECEIPT_FILENAME_TEMPLATE. Requires vendor to be supplied or auto-detectable from the message sender.' },
       vendor: { type: 'string', description: 'Vendor label used in filenameTemplate, e.g. "Acme". When omitted, the vendor is auto-detected from the message sender.' },
-      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' },
+      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists: skip keeps it only if it holds identical bytes (otherwise a new version is written and existingDiffers is set)', default: 'skip' },
       ...mailboxProperty
     },
     required: ['messageId'],
@@ -37,7 +37,7 @@ export const fetchBillingPdfSchema = {
       url: { type: 'string', description: 'Explicit billing-PDF URL (must be on the allowlist)' },
       destDir: { type: 'string', description: 'Destination directory (inside receipts/work dir). Defaults to MCP_OUTLOOK_RECEIPTS_DIR.' },
       fileName: { type: 'string', description: 'Target filename, e.g. "Globex 23Jun26 Invoice.pdf"' },
-      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' },
+      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists: skip keeps it only if it holds identical bytes (otherwise a new version is written and existingDiffers is set)', default: 'skip' },
       ...mailboxProperty
     },
     required: ['fileName'],
@@ -67,7 +67,7 @@ export const renderEmailPdfSchema = {
       messageId: { type: 'string', description: 'The ID of the email to render' },
       destDir: { type: 'string', description: 'Destination directory (inside receipts/work dir). Defaults to MCP_OUTLOOK_RECEIPTS_DIR.' },
       fileName: { type: 'string', description: 'Target filename, e.g. "Hooli 09Jun26 Invoice.pdf"' },
-      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' },
+      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists: skip keeps it only if it holds identical bytes (otherwise a new version is written and existingDiffers is set)', default: 'skip' },
       ...mailboxProperty
     },
     required: ['messageId', 'fileName'],
@@ -76,7 +76,7 @@ export const renderEmailPdfSchema = {
 
 export const collectReceiptsSchema = {
   name: 'outlook_collect_receipts',
-  description: 'Collect all vendor receipts for a period in one call. Discovers each vendor\'s receipt emails by sender/subject/date across the whole mailbox (Sent Items and Drafts excluded; a message found by several rules is processed once), assigns each message to exactly one rule, collapses copies of one receipt (same receipt/invoice/order number, or identical PDF bytes) and saves one PDF per receipt with deterministic names: the PDF attachment, else a per-receipt allowlisted link, else a rendering of the email. Every manifest entry has a status: saved, skipped (file already on disk), not_found, fetch_failed, ambiguous (several rules claim it, or its product cannot be determined; candidates listed) or duplicate (duplicate_of names the receipt number or sha256). Entries carry sender, a forwarded flag and originalSender for forwards, and structured amounts (subtotal, tax, credits, total, currency) read from the saved PDF when it parses, else from the email (amountSource; amountMismatch when they disagree). When the formal invoice cannot be fetched the entry stays fetch_failed with a renderedFallback copy that is marked as not the formal invoice. Returns { period, manifest, missing (not_found vendors), failed (one object per fetch_failed entry with the attempted route, ids and Graph error), summary (count per status), notes }. Idempotent on re-runs.',
+  description: 'Collect all vendor receipts for a period in one call. Discovers each vendor\'s receipt emails by sender/subject/date across the whole mailbox (Sent Items and Drafts excluded; a message found by several rules is processed once), assigns each message to exactly one rule, collapses copies of one receipt (same receipt/invoice/order number, or identical PDF bytes) and saves one PDF per receipt with deterministic names: the PDF attachment, else a per-receipt allowlisted link, else a rendering of the email. Every manifest entry has a status: saved, skipped (an identical file is already on disk; a same-named file with different bytes gets a new version flagged existingDiffers), not_found, fetch_failed, ambiguous (several rules claim it, or its product cannot be determined; candidates listed) or duplicate (duplicate_of names the receipt number or sha256). Entries carry sender, a forwarded flag and originalSender for forwards, and structured amounts (subtotal, tax, credits, total, currency) read from the saved PDF when it parses, else from the email (amountSource; amountMismatch when they disagree). When the formal invoice cannot be fetched the entry stays fetch_failed with a renderedFallback copy that is marked as not the formal invoice. Returns { period, manifest, missing (not_found vendors), failed (one object per fetch_failed entry with the attempted route, ids and Graph error), summary (count per status), unmatched (messages every product matcher rejected), notes }. Idempotent on re-runs.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -107,7 +107,7 @@ export const collectReceiptsSchema = {
         }
       },
       destDir: { type: 'string', description: 'Destination directory (inside receipts/work dir). Defaults to MCP_OUTLOOK_RECEIPTS_DIR.' },
-      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists', default: 'skip' },
+      onExisting: { type: 'string', enum: ['skip', 'overwrite', 'version'], description: 'Collision policy when the target file already exists: skip keeps it only if it holds identical bytes (otherwise a new version is written and existingDiffers is set)', default: 'skip' },
       ...mailboxProperty
     },
     required: ['periodStart', 'periodEnd', 'vendors'],

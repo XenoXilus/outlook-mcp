@@ -449,7 +449,8 @@ export async function downloadAttachmentTool(authManager, args) {
         action: saved.action,
         size: saved.size,
         sizeFormatted: formatFileSize(saved.size),
-        sha256: saved.sha256
+        sha256: saved.sha256,
+        ...(saved.existingDiffers && { existingDiffers: true })
       });
     }
 
