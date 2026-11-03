@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { collectReceiptsTool } from '../../tools/receipts/collectReceipts.js';
 
 const PDF_B64 = Buffer.from('%PDF-1.4 invoice').toString('base64');
@@ -26,17 +27,89 @@ const ATTACHMENT_LIST = { value: [
 
 const ATTACHMENT_FULL = { id: 'a1', name: 'Invoice-0015.pdf', contentType: 'application/pdf', isInline: false, contentBytes: PDF_B64 };
 
+// Well-known folder lookups, made once per run after discovery finds messages.
+const SENT_FOLDER = { id: 'folder-sent' };
+const DRAFTS_FOLDER = { id: 'folder-drafts' };
+
+// Fictional PDFs rendered from the .html files beside them.
+const here = path.dirname(fileURLToPath(import.meta.url));
+const fixturePdf = (name) => fs.readFileSync(path.join(here, '../fixtures/receipts', name));
+
+/**
+ * One message as both the search header and the full message, plus its
+ * attachment list and per-attachment content (base64 string or an MCP error object).
+ */
+function receiptMessage({ id, date, from, subject, html, attachments = [], content = {}, parentFolderId = 'folder-inbox' }) {
+  const header = {
+    id, receivedDateTime: date, hasAttachments: attachments.length > 0, subject,
+    from: { emailAddress: { address: from } }, parentFolderId
+  };
+  return { header, full: { ...header, body: { contentType: 'html', content: html } }, attachments, content };
+}
+
+const pdfAttachment = (id, name) => ({ id, name, contentType: 'application/pdf', isInline: false });
+
+/** Rough Graph $filter emulation: from eq / startswith(from) / contains(subject), OR-ed. */
+function graphSearch(messages) {
+  return (filter) => messages.map(m => m.header).filter(h => {
+    const from = h.from.emailAddress.address.toLowerCase();
+    const subject = h.subject.toLowerCase();
+    const values = (re) => [...filter.matchAll(re)].map(m => m[1].toLowerCase());
+    return values(/from\/emailAddress\/address eq '([^']*)'/g).includes(from) ||
+      values(/startswith\(from\/emailAddress\/address,'([^']*)'\)/g).some(p => from.startsWith(p)) ||
+      values(/contains\(subject,'([^']*)'\)/g).some(s => subject.includes(s));
+  });
+}
+
+/**
+ * makeRequest answered by path, so call order does not matter. `search(filter)`
+ * returns headers (or an MCP error object); folder lookups use `folders`.
+ */
+function mailboxRouter({ messages = [], search = graphSearch(messages), folders = {}, base = '/me' }) {
+  const byId = Object.fromEntries(messages.map(m => [m.header.id, m]));
+  const folderReplies = { sentitems: SENT_FOLDER, drafts: DRAFTS_FOLDER, ...folders };
+  return async (requestPath, options = {}) => {
+    if (requestPath === `${base}/messages`) {
+      const result = search(options.filter || '');
+      return Array.isArray(result) ? { value: result } : result;
+    }
+    const folder = requestPath.match(/^(.*)\/mailFolders\/([^/]+)$/);
+    if (folder && folder[1] === base && folder[2] in folderReplies) return folderReplies[folder[2]];
+    const parts = requestPath.slice(base.length).match(/^\/messages\/([^/]+)(\/attachments(?:\/([^/]+))?)?$/);
+    const message = requestPath.startsWith(base) && parts && byId[parts[1]];
+    if (message) {
+      if (!parts[2]) return message.full;
+      if (!parts[3]) return { value: message.attachments };
+      const content = message.content[parts[3]];
+      if (typeof content === 'string') {
+        return { ...message.attachments.find(a => a.id === parts[3]), contentBytes: content };
+      }
+      if (content) return content;
+    }
+    throw new Error(`Unexpected Graph call: ${requestPath}`);
+  };
+}
+
+function graphFailure(status, code, message) {
+  return {
+    isError: true,
+    content: [{ type: 'text', text: `Graph API error ${status} ${code}: ${message}` }],
+    _errorDetails: { graphError: { status, code, message, requestId: `req-${status}`, method: 'GET' } }
+  };
+}
+
 describe('collectReceiptsTool (FR-6)', () => {
-  let receiptsDir, makeRequest, authManager, savedEnv;
+  let receiptsDir, makeRequest, getBinary, authManager, savedEnv;
 
   beforeEach(() => {
     receiptsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'receipts-'));
     savedEnv = process.env.MCP_OUTLOOK_RECEIPTS_DIR;
     process.env.MCP_OUTLOOK_RECEIPTS_DIR = receiptsDir;
     makeRequest = vi.fn();
+    getBinary = vi.fn().mockRejectedValue(new Error('raw value route unavailable'));
     authManager = {
       ensureAuthenticated: vi.fn().mockResolvedValue(true),
-      getGraphApiClient: vi.fn().mockReturnValue({ makeRequest })
+      getGraphApiClient: vi.fn().mockReturnValue({ makeRequest, getBinary })
     };
   });
 
@@ -53,16 +126,16 @@ describe('collectReceiptsTool (FR-6)', () => {
     })).isError).toBe(true);
   });
 
-  it('saves an attachment receipt and flags an absent vendor as missing', async () => {
-    makeRequest
-      // vendor 1: Acme — search, then extract (message + attachments), then save (list + full)
-      .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })
-      .mockResolvedValueOnce(STRIPE_FULL('m1', '2026-06-29T07:12:00Z'))
-      .mockResolvedValueOnce(ATTACHMENT_LIST)
-      .mockResolvedValueOnce(ATTACHMENT_LIST)
-      .mockResolvedValueOnce(ATTACHMENT_FULL)
-      // vendor 2: Vandelay — search returns nothing
-      .mockResolvedValueOnce({ value: [] });
+  it('saves an attachment receipt and flags an absent vendor as not_found', async () => {
+    // Searches for every vendor run first, then folder lookups, extraction and saving.
+    makeRequest.mockImplementation(mailboxRouter({
+      messages: [{
+        header: stripeMessage('m1', '2026-06-29T07:12:00Z'),
+        full: STRIPE_FULL('m1', '2026-06-29T07:12:00Z'),
+        attachments: ATTACHMENT_LIST.value,
+        content: { a1: PDF_B64 }
+      }]
+    }));
 
     const res = await collectReceiptsTool(authManager, {
       periodStart: '2026-06-01T00:00:00Z',
@@ -84,13 +157,14 @@ describe('collectReceiptsTool (FR-6)', () => {
     expect(fs.existsSync(saved.savedPath)).toBe(true);
 
     expect(out.missing).toEqual(['Vandelay']);
-    expect(out.manifest.find(e => e.vendor === 'Vandelay').status).toBe('missing');
+    expect(out.manifest.find(e => e.vendor === 'Vandelay').status).toBe('not_found');
 
     // search used date-bounded, sender-filtered whole-mailbox query
     const [endpoint, options] = makeRequest.mock.calls[0];
     expect(endpoint).toBe('/me/messages');
     expect(options.filter).toContain("receivedDateTime ge 2026-06-01T00:00:00Z");
     expect(options.filter).toContain("from/emailAddress/address eq 'invoice+statements@mail.acme.com'");
+    expect(options.select.split(',')).toContain('parentFolderId');
   });
 
   // Item 1: link fallback (FR-2) — no attachment, allowlisted Stripe URL in body
@@ -106,6 +180,8 @@ describe('collectReceiptsTool (FR-6)', () => {
 
     makeRequest
       .mockResolvedValueOnce({ value: [linkMsgHeader] }) // search
+      .mockResolvedValueOnce(SENT_FOLDER)                // excluded-folder lookups
+      .mockResolvedValueOnce(DRAFTS_FOLDER)
       .mockResolvedValueOnce(linkMsgFull);               // extractReceiptCore: message detail
 
     const PDF_LINK = Buffer.from('%PDF-1.4 link-invoice');
@@ -149,6 +225,8 @@ describe('collectReceiptsTool (FR-6)', () => {
 
     makeRequest
       .mockResolvedValueOnce({ value: [renderMsgHeader] }) // search
+      .mockResolvedValueOnce(SENT_FOLDER)                  // excluded-folder lookups
+      .mockResolvedValueOnce(DRAFTS_FOLDER)
       .mockResolvedValueOnce(renderMsgFull)                // extractReceiptCore: message detail
       .mockResolvedValueOnce(renderMsgFull);               // renderEmailPdfCore: message detail
 
@@ -250,16 +328,20 @@ describe('collectReceiptsTool (FR-6)', () => {
       periodEnd: '2026-06-30T23:59:59Z',
       vendors: [{ vendor: 'Acme', from: 'invoice+statements@mail.acme.com' }]
     };
-    // Each run needs: search + extract msg + extract attachments + save list + save full
+    // Each run needs: search + folder lookups + extract msg + extract attachments + save list + save full
     makeRequest
       // Run 1
       .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })
+      .mockResolvedValueOnce(SENT_FOLDER)
+      .mockResolvedValueOnce(DRAFTS_FOLDER)
       .mockResolvedValueOnce(STRIPE_FULL('m1', '2026-06-29T07:12:00Z'))
       .mockResolvedValueOnce(ATTACHMENT_LIST)
       .mockResolvedValueOnce(ATTACHMENT_LIST)
       .mockResolvedValueOnce(ATTACHMENT_FULL)
       // Run 2
       .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })
+      .mockResolvedValueOnce(SENT_FOLDER)
+      .mockResolvedValueOnce(DRAFTS_FOLDER)
       .mockResolvedValueOnce(STRIPE_FULL('m1', '2026-06-29T07:12:00Z'))
       .mockResolvedValueOnce(ATTACHMENT_LIST)
       .mockResolvedValueOnce(ATTACHMENT_LIST)
@@ -272,7 +354,8 @@ describe('collectReceiptsTool (FR-6)', () => {
     const res2 = await collectReceiptsTool(authManager, args);
     const out2 = JSON.parse(res2.content[0].text);
     expect(out2.manifest[0].action).toBe('skipped');
-    expect(out2.manifest[0].status).toBe('saved'); // status is still 'saved' even when skipped
+    expect(out2.manifest[0].status).toBe('skipped'); // the file was already on disk
+    expect(out2.summary.skipped).toBe(1);
 
     // Only one PDF file on disk — no duplicate
     const files = fs.readdirSync(receiptsDir).filter(f => f.endsWith('.pdf'));
@@ -283,6 +366,8 @@ describe('collectReceiptsTool (FR-6)', () => {
   it('records currencyMismatch when receipt currency differs from expectedCurrency', async () => {
     makeRequest
       .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })
+      .mockResolvedValueOnce(SENT_FOLDER)
+      .mockResolvedValueOnce(DRAFTS_FOLDER)
       .mockResolvedValueOnce(STRIPE_FULL('m1', '2026-06-29T07:12:00Z'))
       .mockResolvedValueOnce(ATTACHMENT_LIST)
       .mockResolvedValueOnce(ATTACHMENT_LIST)
@@ -341,6 +426,8 @@ describe('collectReceiptsTool (FR-6)', () => {
   it('combines from and subjectContains with OR so a sender mismatch cannot hide a subject hit', async () => {
     makeRequest
       .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })
+      .mockResolvedValueOnce(SENT_FOLDER)
+      .mockResolvedValueOnce(DRAFTS_FOLDER)
       .mockResolvedValueOnce(STRIPE_FULL('m1', '2026-06-29T07:12:00Z'))
       .mockResolvedValueOnce(ATTACHMENT_LIST)
       .mockResolvedValueOnce(ATTACHMENT_LIST)
@@ -377,6 +464,8 @@ describe('collectReceiptsTool (FR-6)', () => {
     makeRequest
       .mockResolvedValueOnce({ value: [] })              // exact-from search: nothing
       .mockResolvedValueOnce({ value: [driftedHeader] }) // startswith fallback search
+      .mockResolvedValueOnce(SENT_FOLDER)                // excluded-folder lookups
+      .mockResolvedValueOnce(DRAFTS_FOLDER)
       .mockResolvedValueOnce(driftedFull)                // extract: message
       .mockResolvedValueOnce(ATTACHMENT_LIST)            // extract: attachments
       .mockResolvedValueOnce(ATTACHMENT_LIST)            // save: list
@@ -418,7 +507,7 @@ describe('collectReceiptsTool (FR-6)', () => {
 
     const out = JSON.parse(res.content[0].text);
     expect(out.missing).toEqual(['Stripe']);
-    expect(out.manifest[0].status).toBe('missing');
+    expect(out.manifest[0].status).toBe('not_found');
   });
 
   // --- date windows: the last day of the month must be inside the window ---
@@ -440,11 +529,14 @@ describe('collectReceiptsTool (FR-6)', () => {
     expect(options.filter).not.toContain('le 2026-08-31');
   });
 
-  it('marks a vendor entry ambiguous (with error) when saving fails, and continues', async () => {
+  it('marks a vendor entry fetch_failed (with error) when reading the message fails, and continues', async () => {
     makeRequest
       .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })
-      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Graph exploded' }], isError: true }) // extract fails
-      .mockResolvedValueOnce({ value: [] }); // second vendor still processed
+      .mockResolvedValueOnce({ value: [] }) // second vendor still searched
+      .mockResolvedValueOnce({ value: [] }) // ...and its sender fallback
+      .mockResolvedValueOnce(SENT_FOLDER)
+      .mockResolvedValueOnce(DRAFTS_FOLDER)
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Graph exploded' }], isError: true }); // extract fails
 
     const res = await collectReceiptsTool(authManager, {
       periodStart: '2026-06-01T00:00:00Z', periodEnd: '2026-06-30T23:59:59Z',
@@ -455,14 +547,18 @@ describe('collectReceiptsTool (FR-6)', () => {
     });
     const out = JSON.parse(res.content[0].text);
     const failed = out.manifest.find(e => e.vendor === 'Acme');
-    expect(failed.status).toBe('ambiguous');
+    expect(failed.status).toBe('fetch_failed');
+    expect(failed.attemptedRoute).toBe('message');
     expect(failed.error).toContain('Graph exploded');
+    expect(out.failed).toHaveLength(1);
     expect(out.missing).toEqual(['Vandelay']);
   });
 
   it('routes the whole collection run through a per-call mailbox', async () => {
     makeRequest
       .mockResolvedValueOnce({ value: [stripeMessage('m1', '2026-06-29T07:12:00Z')] })
+      .mockResolvedValueOnce(SENT_FOLDER)
+      .mockResolvedValueOnce(DRAFTS_FOLDER)
       .mockResolvedValueOnce(STRIPE_FULL('m1', '2026-06-29T07:12:00Z'))
       .mockResolvedValueOnce(ATTACHMENT_LIST)
       .mockResolvedValueOnce(ATTACHMENT_LIST)
@@ -477,5 +573,525 @@ describe('collectReceiptsTool (FR-6)', () => {
     for (const call of makeRequest.mock.calls) {
       expect(call[0].startsWith('/users/finance-shared%40example.com/')).toBe(true);
     }
+  });
+
+  // --- statuses, discovery hygiene, claiming, dedupe, save routes, amounts ---
+
+  describe('manifest statuses and claiming', () => {
+    const PERIOD = { periodStart: '2026-06-01', periodEnd: '2026-06-30' };
+    const renderPdf = () => vi.fn().mockImplementation(async (doc) =>
+      Buffer.from(`%PDF-1.4 rendered ${doc.length} ${Math.random()}`));
+
+    async function run(vendors, { messages = [], search, folders, deps = {}, args = {} } = {}) {
+      makeRequest.mockImplementation(mailboxRouter({ messages, search, folders }));
+      const res = await collectReceiptsTool(authManager, { ...PERIOD, vendors, ...args }, deps);
+      expect(res.isError).toBeFalsy();
+      return JSON.parse(res.content[0].text);
+    }
+
+    const graphPaths = () => makeRequest.mock.calls.map(c => c[0]);
+    const pdfFiles = () => fs.readdirSync(receiptsDir).filter(f => f.endsWith('.pdf'));
+
+    it('reports saved, not_found, fetch_failed and ambiguous apart, with a count per status', async () => {
+      const acme = receiptMessage({
+        id: 'm-acme', date: '2026-06-29T07:12:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Receipt number 1001-2001</p><p>Amount paid £42.00</p>',
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: PDF_B64 }
+      });
+      const umbrella = receiptMessage({
+        id: 'm-umbrella', date: '2026-06-20T07:12:00Z', from: 'billing@umbrella.example', subject: 'Umbrella receipt',
+        html: '<p>Amount paid $9.00</p>'
+      });
+      const search = (filter) => (filter.includes('globex')
+        ? graphFailure(503, 'ServiceUnavailable', 'Try again later')
+        : graphSearch([acme, umbrella])(filter));
+
+      const out = await run([
+        { vendor: 'Acme', from: 'billing@acme.example' },
+        { vendor: 'Globex', from: 'billing@globex.example' },
+        { vendor: 'Initech', from: 'billing@initech.example' },
+        { vendor: 'Umbrella', from: 'billing@umbrella.example' },
+        { vendor: 'Umbrella Ops', subjectContains: 'Umbrella receipt' }
+      ], { messages: [acme, umbrella], search });
+
+      const byVendor = (v) => out.manifest.find(e => e.vendor === v);
+      expect(byVendor('Acme').status).toBe('saved');
+      expect(byVendor('Globex').status).toBe('fetch_failed');
+      expect(byVendor('Initech').status).toBe('not_found');
+      const ambiguous = out.manifest.find(e => e.status === 'ambiguous');
+      expect(ambiguous.candidates).toEqual(['Umbrella', 'Umbrella Ops']);
+
+      expect(out.summary).toEqual({ saved: 1, skipped: 0, not_found: 1, fetch_failed: 1, ambiguous: 1, duplicate: 0 });
+      expect(out.missing).toEqual(['Initech']); // only not_found vendors
+      expect(out.failed.map(f => f.vendor)).toEqual(['Globex']);
+      expect(out.notes).toEqual([]);
+    });
+
+    it('turns a failed vendor search into fetch_failed with the Graph error, listed in failed[]', async () => {
+      const out = await run(
+        [{ vendor: 'Globex', from: 'billing@globex.example' }],
+        { search: () => graphFailure(503, 'ServiceUnavailable', 'Try again later') }
+      );
+
+      const entry = out.manifest[0];
+      expect(entry).toMatchObject({ vendor: 'Globex', status: 'fetch_failed', attemptedRoute: 'search' });
+      expect(entry.graphError).toMatchObject({ status: 503, code: 'ServiceUnavailable', requestId: 'req-503' });
+      expect(entry.error).toContain('Search failed: Graph API error 503 ServiceUnavailable');
+      expect(out.failed).toEqual([entry]);
+      expect(out.missing).toEqual([]);
+      expect(out.summary.ambiguous).toBe(0);
+    });
+
+    it('records an attachment fetch failure as fetch_failed and keeps a rendered copy that is not the invoice', async () => {
+      const msg = receiptMessage({
+        id: 'm1', date: '2026-06-29T07:12:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Amount paid £42.00</p>',
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')],
+        content: { a1: graphFailure(400, 'ErrorInvalidRequest', 'Attachment content unavailable') }
+      });
+      const renderImpl = renderPdf();
+
+      const out = await run([{ vendor: 'Acme', from: 'billing@acme.example' }], { messages: [msg], deps: { renderImpl } });
+
+      const entry = out.manifest[0];
+      expect(entry).toMatchObject({
+        vendor: 'Acme', status: 'fetch_failed', attemptedRoute: 'attachment', messageId: 'm1',
+        attachmentId: 'a1', attachmentName: 'Invoice-0015.pdf', amount: 42, currency: 'GBP', amountSource: 'body'
+      });
+      expect(entry.graphError).toMatchObject({ status: 400, code: 'ErrorInvalidRequest' });
+      expect(entry.error).toContain('Could not fetch the content of attachment');
+      expect(entry.savedPath).toBeUndefined();
+
+      expect(entry.renderedFallback).toMatchObject({ method: 'rendered', isFormalInvoice: false });
+      expect(entry.renderedFallback.reason).toMatch(/not the formal invoice/);
+      expect(entry.renderedFallback.sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(path.basename(entry.renderedFallback.savedPath)).toBe('Acme 29Jun26 Invoice (rendered).pdf');
+      expect(pdfFiles()).toEqual(['Acme 29Jun26 Invoice (rendered).pdf']); // never under the invoice name
+
+      expect(out.failed).toHaveLength(1);
+      expect(out.failed[0].renderedFallback.savedPath).toBe(entry.renderedFallback.savedPath);
+      expect(out.summary).toMatchObject({ fetch_failed: 1, saved: 0 });
+    });
+
+    it('notes a failed degraded render without hiding the fetch failure', async () => {
+      const msg = receiptMessage({
+        id: 'm1', date: '2026-06-29T07:12:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Amount paid £42.00</p>',
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')],
+        content: { a1: graphFailure(500, 'InternalServerError', 'boom') }
+      });
+      const renderImpl = vi.fn().mockRejectedValue(new Error('Chrome not available'));
+
+      const out = await run([{ vendor: 'Acme', from: 'billing@acme.example' }], { messages: [msg], deps: { renderImpl } });
+
+      expect(out.manifest[0].status).toBe('fetch_failed');
+      expect(out.manifest[0].renderedFallback).toBeUndefined();
+      expect(out.manifest[0].renderedFallbackError).toContain('Chrome not available');
+      expect(pdfFiles()).toEqual([]);
+    });
+
+    it('ignores messages in Sent Items and Drafts', async () => {
+      const inbox = receiptMessage({
+        id: 'm-inbox', date: '2026-06-10T09:00:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Receipt number 1001-3001</p><p>Amount paid $10.00</p>'
+      });
+      const sentReply = receiptMessage({
+        id: 'm-sent', date: '2026-06-11T09:00:00Z', from: 'me@example.com', subject: 'RE: Your Acme receipt',
+        html: '<p>Thanks</p><p>Receipt number 1001-3001</p>', parentFolderId: 'folder-sent'
+      });
+      const draft = receiptMessage({
+        id: 'm-draft', date: '2026-06-12T09:00:00Z', from: 'me@example.com', subject: 'FW: Your Acme receipt',
+        html: '<p>Receipt number 1001-3001</p>', parentFolderId: 'folder-drafts'
+      });
+      const globexForward = receiptMessage({
+        id: 'm-globex-sent', date: '2026-06-13T09:00:00Z', from: 'me@example.com', subject: 'Fw: Globex receipt',
+        html: '<p>Amount paid $5.00</p>', parentFolderId: 'folder-sent'
+      });
+
+      const out = await run([
+        { vendor: 'Acme', subjectContains: 'Your Acme receipt' },
+        { vendor: 'Globex', subjectContains: 'Globex receipt' }
+      ], { messages: [sentReply, draft, inbox, globexForward], deps: { renderImpl: renderPdf() } });
+
+      const acme = out.manifest.filter(e => e.vendor === 'Acme');
+      expect(acme).toHaveLength(1);
+      expect(acme[0]).toMatchObject({ status: 'saved', sourceMessageId: 'm-inbox' });
+      expect(out.manifest.find(e => e.vendor === 'Globex')).toEqual({ vendor: 'Globex', status: 'not_found', excludedByFolder: 1 });
+
+      expect(graphPaths()).toContain('/me/mailFolders/sentitems');
+      expect(graphPaths()).toContain('/me/mailFolders/drafts');
+      expect(makeRequest.mock.calls.find(c => c[0] === '/me/mailFolders/sentitems')[1]).toEqual({ select: 'id' });
+      expect(graphPaths().filter(p => /m-sent|m-draft|m-globex-sent/.test(p))).toEqual([]);
+    });
+
+    it('excludes nothing and leaves a note when the Sent Items folder cannot be resolved', async () => {
+      const sentReply = receiptMessage({
+        id: 'm-sent', date: '2026-06-11T09:00:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Amount paid $10.00</p>', parentFolderId: 'folder-sent'
+      });
+
+      const out = await run([{ vendor: 'Acme', from: 'billing@acme.example' }], {
+        messages: [sentReply],
+        folders: { sentitems: graphFailure(403, 'ErrorAccessDenied', 'Access is denied') },
+        deps: { renderImpl: renderPdf() }
+      });
+
+      expect(out.manifest[0]).toMatchObject({ status: 'saved', sourceMessageId: 'm-sent' });
+      expect(out.notes).toHaveLength(1);
+      expect(out.notes[0]).toMatch(/sentitems folder .*Access is denied.*not excluded/);
+    });
+
+    describe('copies of one receipt', () => {
+      const RULE = { vendor: 'Acme', from: 'billing@acme.example', subjectContains: 'Your Acme receipt' };
+      const quoted = '<p>From: Acme Billing &lt;billing@acme.example&gt;<br>Sent: Wednesday 10 June 09:00<br>' +
+        'To: me@example.com<br>Subject: Your Acme receipt</p>';
+      const receiptBody = '<p>Receipt number 2060-1001</p><p>Amount paid $42.00</p>';
+
+      const original = receiptMessage({
+        id: 'm-orig', date: '2026-06-10T09:00:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: receiptBody,
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')],
+        content: { a1: Buffer.from('%PDF-1.4 acme 2060-1001').toString('base64') }
+      });
+      const forward = receiptMessage({
+        id: 'm-fw', date: '2026-06-11T09:00:00Z', from: 'colleague@example.com', subject: 'Fw: Your Acme receipt',
+        html: `<p>FYI</p>${quoted}${receiptBody}`,
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')],
+        content: { a1: Buffer.from('%PDF-1.4 acme 2060-1001').toString('base64') }
+      });
+      const reply = receiptMessage({
+        id: 'm-re', date: '2026-06-12T09:00:00Z', from: 'colleague@example.com', subject: 'RE: Your Acme receipt',
+        html: `<p>Paid, thanks</p>${quoted}${receiptBody}`
+      });
+
+      it('saves one representative and marks the Fw: and Re: copies as duplicates', async () => {
+        // Graph returns newest first.
+        const out = await run([RULE], { messages: [reply, forward, original] });
+
+        const saved = out.manifest.filter(e => e.status === 'saved');
+        expect(saved).toHaveLength(1);
+        expect(saved[0]).toMatchObject({
+          sourceMessageId: 'm-orig', method: 'attachment', isFormalInvoice: true,
+          receiptNumber: '2060-1001', sender: 'billing@acme.example', forwarded: false
+        });
+        expect(saved[0].matchedBy).toEqual(['from', 'subject']);
+        expect(saved[0].originalSender).toBeUndefined();
+
+        const duplicates = out.manifest.filter(e => e.status === 'duplicate');
+        expect(duplicates.map(d => d.sourceMessageId).sort()).toEqual(['m-fw', 'm-re']);
+        for (const d of duplicates) {
+          expect(d).toMatchObject({
+            vendor: 'Acme', duplicate_of: 'receiptNumber:2060-1001', duplicateOfMessageId: 'm-orig',
+            forwarded: true, sender: 'colleague@example.com',
+            originalSender: 'billing@acme.example', originalSenderName: 'Acme Billing'
+          });
+          expect(d.matchedBy).toEqual(['subject']); // matched on the normalised subject
+          expect(d.amount).toBeUndefined(); // never counted twice
+          expect(d.savedPath).toBeUndefined();
+        }
+        expect(out.manifest.find(d => d.sourceMessageId === 'm-fw').date).toBe('2026-06-11T09:00:00Z');
+
+        expect(pdfFiles()).toEqual(['Acme 10Jun26 Invoice.pdf']);
+        expect(graphPaths()).not.toContain('/me/messages/m-fw/attachments/a1');
+        expect(out.summary).toMatchObject({ saved: 1, duplicate: 2 });
+      });
+
+      it('prefers the copy carrying an Invoice-*.pdf as the representative', async () => {
+        const receiptOnly = receiptMessage({
+          id: 'm-early', date: '2026-06-09T09:00:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+          html: receiptBody,
+          attachments: [pdfAttachment('r1', 'Receipt-2060-1001.pdf')],
+          content: { r1: Buffer.from('%PDF-1.4 receipt copy').toString('base64') }
+        });
+
+        const out = await run([RULE], { messages: [forward, receiptOnly] });
+
+        const saved = out.manifest.find(e => e.status === 'saved');
+        expect(saved.sourceMessageId).toBe('m-fw');
+        expect(saved.attachmentName).toBe('Invoice-0015.pdf');
+        expect(saved.forwarded).toBe(true);
+        expect(out.manifest.find(e => e.status === 'duplicate').sourceMessageId).toBe('m-early');
+      });
+    });
+
+    it('flags a receipt as forwarded when the sender is not the rule sender', async () => {
+      const msg = receiptMessage({
+        id: 'm1', date: '2026-06-10T09:00:00Z', from: 'accounts@example.com', subject: 'Your Acme receipt',
+        html: '<p>Amount paid $42.00</p>'
+      });
+
+      const out = await run(
+        [{ vendor: 'Acme', from: 'billing@acme.example', subjectContains: 'Acme receipt' }],
+        { messages: [msg], deps: { renderImpl: renderPdf() } }
+      );
+
+      expect(out.manifest[0]).toMatchObject({
+        status: 'saved', forwarded: true, sender: 'accounts@example.com', matchedBy: ['subject']
+      });
+    });
+
+    describe('product matchers', () => {
+      const FROM = 'billing@acme.example';
+      const itemReceipt = (id, day, item, number) => receiptMessage({
+        id, date: `2026-06-${day}T09:00:00Z`, from: FROM, subject: 'Your Acme receipt',
+        html: `<p>Receipt number ${number}</p><table><tr><td>${item}</td><td>$12.00</td></tr></table><p>Total $12.00</p>`
+      });
+      const studio = itemReceipt('m-studio', '20', 'Studio plan - 3x', '3000-0001');
+      const gadget = itemReceipt('m-gadget', '15', 'Gadget kit - Lite', '3000-0002');
+      const support = itemReceipt('m-support', '10', 'Support plan', '3000-0003');
+      const extractCalls = (id) => makeRequest.mock.calls
+        .filter(c => c[0] === `/me/messages/${id}` && c[1]?.select?.includes('hasAttachments')).length;
+
+      it('splits one sender into three labelled streams with productContains/productExcludes', async () => {
+        const out = await run([
+          { vendor: 'Acme Studio', from: FROM, productContains: 'studio' },
+          { vendor: 'Acme Gadget', from: FROM, productContains: ['gadget'], productExcludes: 'Studio' },
+          { vendor: 'Acme Other', from: FROM, productExcludes: ['Studio', 'Gadget'] }
+        ], { messages: [studio, gadget, support], deps: { renderImpl: renderPdf() } });
+
+        const owner = (id) => out.manifest.find(e => e.sourceMessageId === id);
+        expect(owner('m-studio')).toMatchObject({ vendor: 'Acme Studio', status: 'saved', productLabel: 'Studio plan - 3x' });
+        expect(owner('m-studio').matchedBy).toEqual(['from', 'product:contains:studio']);
+        expect(owner('m-gadget')).toMatchObject({ vendor: 'Acme Gadget', status: 'saved', productLabel: 'Gadget kit - Lite' });
+        expect(owner('m-gadget').matchedBy).toEqual(['from', 'product:contains:gadget', 'product:excludes']);
+        expect(owner('m-support')).toMatchObject({ vendor: 'Acme Other', status: 'saved', productLabel: 'Support plan' });
+        expect(owner('m-support').matchedBy).toEqual(['from', 'product:excludes']);
+        expect(out.manifest).toHaveLength(3);
+        expect(out.missing).toEqual([]);
+
+        // Found by all three searches, but each message is read once.
+        for (const id of ['m-studio', 'm-gadget', 'm-support']) expect(extractCalls(id)).toBe(1);
+        expect(out.notes).toContain('Acme Studio: 2 message(s) excluded by productContains/productExcludes');
+      });
+
+      it('gives a message to the rule whose productContains matched over a rule without product matchers', async () => {
+        const out = await run([
+          { vendor: 'Acme', from: FROM },
+          { vendor: 'Acme Studio', from: FROM, productContains: 'Studio' },
+          { vendor: 'Acme Plans', from: FROM, productContains: 'plan' }
+        ], { messages: [studio, gadget, support], deps: { renderImpl: renderPdf() } });
+
+        const entry = (id) => out.manifest.find(e => e.sourceMessageId === id);
+        expect(entry('m-gadget')).toMatchObject({ vendor: 'Acme', status: 'saved' });     // only the catch-all claims it
+        expect(entry('m-support')).toMatchObject({ vendor: 'Acme Plans', status: 'saved' }); // specific beats catch-all
+        // Two specific rules both match: ambiguous between them, the catch-all is not a candidate.
+        expect(entry('m-studio')).toMatchObject({ status: 'ambiguous', vendor: null, candidates: ['Acme Studio', 'Acme Plans'] });
+        expect(entry('m-studio').reason).toMatch(/claimed by 2 vendor rules/);
+      });
+
+      it('reports ambiguous, never guesses, when a product matcher meets a receipt with no product', async () => {
+        const noProduct = receiptMessage({
+          id: 'm1', date: '2026-06-10T09:00:00Z', from: FROM, subject: 'Your Acme receipt',
+          html: '<p>Amount paid $5.00</p>'
+        });
+        const renderImpl = renderPdf();
+
+        const out = await run([{ vendor: 'Acme Studio', from: FROM, productContains: 'Studio' }], {
+          messages: [noProduct], deps: { renderImpl }
+        });
+
+        expect(out.manifest).toHaveLength(1);
+        expect(out.manifest[0]).toMatchObject({
+          vendor: 'Acme Studio', status: 'ambiguous', candidates: ['Acme Studio'], sourceMessageId: 'm1'
+        });
+        expect(out.manifest[0].reason).toMatch(/product could not be determined/);
+        expect(out.missing).toEqual([]);
+        expect(renderImpl).not.toHaveBeenCalled();
+        expect(pdfFiles()).toEqual([]);
+      });
+
+      it('rejects product matchers that are not a string or an array of strings', async () => {
+        const call = (rule) => collectReceiptsTool(authManager, { ...PERIOD, vendors: [{ vendor: 'Acme', from: FROM, ...rule }] });
+
+        for (const rule of [
+          { productContains: 5 },
+          { productContains: { term: 'Studio' } },
+          { productContains: [] },
+          { productContains: '   ' },
+          { productExcludes: ['Studio', 3] },
+          { productExcludes: true }
+        ]) {
+          const res = await call(rule);
+          expect(res.isError).toBe(true);
+          expect(res.content[0].text).toMatch(/product(Contains|Excludes)/);
+        }
+        expect(makeRequest).not.toHaveBeenCalled();
+
+        makeRequest.mockImplementation(mailboxRouter({}));
+        expect((await call({ productContains: 'Studio', productExcludes: ['Gadget', 'Kit'] })).isError).toBeFalsy();
+      });
+    });
+
+    it('lets two rules that claim one message produce a single ambiguous entry and save nothing', async () => {
+      const msg = receiptMessage({
+        id: 'm1', date: '2026-06-10T09:00:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Amount paid $42.00</p>',
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: PDF_B64 }
+      });
+
+      const out = await run([
+        { vendor: 'Acme', from: 'billing@acme.example' },
+        { vendor: 'Acme Billing', subjectContains: 'Acme receipt' }
+      ], { messages: [msg] });
+
+      expect(out.manifest).toHaveLength(1);
+      expect(out.manifest[0]).toMatchObject({
+        status: 'ambiguous', vendor: null, candidates: ['Acme', 'Acme Billing'], sourceMessageId: 'm1'
+      });
+      expect(out.missing).toEqual([]);
+      expect(graphPaths()).not.toContain('/me/messages/m1/attachments/a1');
+      expect(pdfFiles()).toEqual([]);
+    });
+
+    describe('billing links', () => {
+      let savedAllowlist;
+      beforeEach(() => {
+        savedAllowlist = process.env.BILLING_DOMAIN_ALLOWLIST;
+        process.env.BILLING_DOMAIN_ALLOWLIST = 'billing.example.com';
+      });
+      afterEach(() => {
+        if (savedAllowlist === undefined) delete process.env.BILLING_DOMAIN_ALLOWLIST;
+        else process.env.BILLING_DOMAIN_ALLOWLIST = savedAllowlist;
+      });
+
+      it('skips a link shared by several receipts and renders those instead', async () => {
+        const portal = 'https://billing.example.com/portal/invoices/latest.pdf';
+        const linked = (id, day, number, url, subject = 'Initech receipt') => receiptMessage({
+          id, date: `2026-06-${day}T09:00:00Z`, from: 'billing@initech.example', subject,
+          html: `<p>Receipt number ${number}</p><p>Amount paid $5.00</p><a href="${url}">Download invoice</a>`
+        });
+        const messages = [
+          linked('m1', '05', '77-1', portal),
+          linked('m2', '06', '77-2', portal),
+          linked('m3', '07', '77-3', 'https://billing.example.com/r/77-3/invoice.pdf'),
+          // Two copies of one receipt sharing a link still count as one receipt.
+          linked('m4', '08', '88-1', 'https://billing.example.com/r/88-1/invoice.pdf'),
+          linked('m5', '09', '88-1', 'https://billing.example.com/r/88-1/invoice.pdf', 'Fw: Initech receipt')
+        ];
+        const fetchImpl = vi.fn().mockImplementation(async (url) => {
+          const bytes = Buffer.from(`%PDF-1.4 ${url}`);
+          return {
+            status: 200, ok: true,
+            headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'application/pdf' : null) },
+            arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+          };
+        });
+
+        const out = await run([{ vendor: 'Initech', from: 'billing@initech.example' }], {
+          messages, deps: { fetchImpl, renderImpl: renderPdf() }
+        });
+
+        const entry = (id) => out.manifest.find(e => e.sourceMessageId === id);
+        for (const id of ['m1', 'm2']) {
+          expect(entry(id)).toMatchObject({ status: 'saved', method: 'rendered', isFormalInvoice: false, amountSource: 'body' });
+          expect(entry(id).linkSkipped).toMatch(/shared by 2 receipts/);
+        }
+        expect(entry('m3')).toMatchObject({ status: 'saved', method: 'link', isFormalInvoice: true });
+        expect(entry('m4')).toMatchObject({ status: 'saved', method: 'link' });
+        expect(entry('m4').linkSkipped).toBeUndefined();
+        expect(entry('m5')).toMatchObject({ status: 'duplicate', duplicate_of: 'receiptNumber:88-1' });
+        expect(fetchImpl.mock.calls.map(c => c[0]).sort()).toEqual([
+          'https://billing.example.com/r/77-3/invoice.pdf',
+          'https://billing.example.com/r/88-1/invoice.pdf'
+        ]);
+      });
+    });
+
+    it('prefers the amounts printed in the saved PDF and flags a disagreement with the email', async () => {
+      const acme = receiptMessage({
+        id: 'm-acme', date: '2026-06-29T09:00:00Z', from: 'billing@acme.example', subject: 'Your Acme invoice',
+        html: '<p>Amount paid £86.40</p>',
+        attachments: [pdfAttachment('a1', 'Invoice-0042.pdf')],
+        content: { a1: fixturePdf('acme-invoice-uk.pdf').toString('base64') }
+      });
+      const globex = receiptMessage({
+        id: 'm-globex', date: '2026-06-23T09:00:00Z', from: 'billing@globex.example', subject: 'Your Globex receipt',
+        html: '<p>Amount paid $25.00</p>',
+        attachments: [pdfAttachment('a1', 'Receipt-4321.pdf')],
+        content: { a1: fixturePdf('globex-receipt-usage.pdf').toString('base64') }
+      });
+
+      const out = await run([
+        { vendor: 'Acme', from: 'billing@acme.example', expectedCurrency: 'GBP' },
+        { vendor: 'Globex', from: 'billing@globex.example', expectedCurrency: 'USD' }
+      ], { messages: [acme, globex] });
+
+      const a = out.manifest.find(e => e.vendor === 'Acme');
+      expect(a).toMatchObject({
+        status: 'saved', amountSource: 'pdf', amount: 86.4, currency: 'GBP', taxAmount: 14.4,
+        productLabel: 'Studio plan - 3x; Gadget plan - Lite', invoiceNumber: 'ZQXV9876-0042'
+      });
+      expect(a.amounts).toEqual({
+        subtotal: 72, tax: 14.4, credits: null, total: 86.4, amountPaid: 86.4, currency: 'GBP', source: 'pdf'
+      });
+      expect(a.amountMismatch).toBeUndefined();
+      expect(a.currencyMismatch).toBeUndefined();
+
+      const g = out.manifest.find(e => e.vendor === 'Globex');
+      expect(g).toMatchObject({ status: 'saved', amountSource: 'pdf', amount: 22, currency: 'USD', receiptNumber: '5555-0000-4321' });
+      expect(g.amounts).toMatchObject({ credits: 12.5, total: 22, source: 'pdf' });
+      expect(g.amountMismatch).toEqual({ body: 25, pdf: 22 });
+    }, 30000);
+
+    it('keeps body amounts and a note when the saved PDF cannot be parsed', async () => {
+      const msg = receiptMessage({
+        id: 'm1', date: '2026-06-29T07:12:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Amount paid £42.00</p>',
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: PDF_B64 } // header only, no PDF body
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => {}); // pdfjs warnings
+
+      const out = await run([{ vendor: 'Acme', from: 'billing@acme.example' }], { messages: [msg] });
+
+      expect(out.manifest[0]).toMatchObject({ status: 'saved', amount: 42, currency: 'GBP', amountSource: 'body' });
+      expect(out.manifest[0].pdfParseNote).toMatch(/could not be parsed/);
+      vi.restoreAllMocks();
+    });
+
+    it('marks an identical PDF saved for another message as a sha256 duplicate and removes the extra file', async () => {
+      const bytes = Buffer.from('%PDF-1.4 same invoice bytes').toString('base64');
+      const later = receiptMessage({
+        id: 'm-later', date: '2026-06-20T09:00:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Receipt number 5000-0002</p><p>Amount paid $42.00</p>',
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: bytes }
+      });
+      const earlier = receiptMessage({
+        id: 'm-earlier', date: '2026-06-10T09:00:00Z', from: 'billing@acme.example', subject: 'Your Acme receipt',
+        html: '<p>Receipt number 5000-0001</p><p>Amount paid $42.00</p>',
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: bytes }
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const out = await run([{ vendor: 'Acme', from: 'billing@acme.example' }], { messages: [later, earlier] });
+      vi.restoreAllMocks();
+
+      const saved = out.manifest.find(e => e.status === 'saved');
+      const duplicate = out.manifest.find(e => e.status === 'duplicate');
+      expect(saved.sourceMessageId).toBe('m-later'); // processed first
+      expect(duplicate).toMatchObject({
+        sourceMessageId: 'm-earlier', duplicate_of: `sha256:${saved.sha256}`, duplicateOfMessageId: 'm-later'
+      });
+      expect(duplicate.amount).toBeUndefined();
+      expect(duplicate.savedPath).toBeUndefined();
+      expect(fs.existsSync(duplicate.removedPath)).toBe(false);
+      expect(pdfFiles()).toEqual([path.basename(saved.savedPath)]);
+    });
+
+    it('reports a file already on disk as skipped and reads its amounts', async () => {
+      fs.writeFileSync(path.join(receiptsDir, 'Acme 29Jun26 Invoice.pdf'), fixturePdf('acme-invoice-uk.pdf'));
+      const msg = receiptMessage({
+        id: 'm1', date: '2026-06-29T07:12:00Z', from: 'billing@acme.example', subject: 'Your Acme invoice',
+        html: '<p>Amount paid £86.40</p>',
+        attachments: [pdfAttachment('a1', 'Invoice-0015.pdf')], content: { a1: PDF_B64 }
+      });
+
+      const out = await run([{ vendor: 'Acme', from: 'billing@acme.example' }], { messages: [msg] });
+
+      expect(out.manifest[0]).toMatchObject({
+        status: 'skipped', action: 'skipped', method: 'attachment', amountSource: 'pdf', amount: 86.4
+      });
+      expect(out.summary).toMatchObject({ skipped: 1, saved: 0 });
+      expect(fs.readFileSync(path.join(receiptsDir, 'Acme 29Jun26 Invoice.pdf'))).toEqual(fixturePdf('acme-invoice-uk.pdf'));
+    }, 30000);
   });
 });

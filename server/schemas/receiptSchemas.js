@@ -1,5 +1,6 @@
 /**
- * Receipt/invoice-run MCP tool schemas (spec: Autonomous Invoice Submission).
+ * Receipt MCP tool schemas: save attachments, fetch billing PDFs, extract
+ * receipt summaries, render emails to PDF and collect a period's receipts.
  */
 
 import { mailboxProperty } from './sharedSchemaFragments.js';
@@ -28,7 +29,7 @@ export const saveAttachmentSchema = {
 
 export const fetchBillingPdfSchema = {
   name: 'outlook_fetch_billing_pdf',
-  description: 'Fetch a billing PDF from an allowlisted host (default: Stripe) linked in an email body, and save it. Fallback for receipts without PDF attachments. HTTPS-only, allowlist-only, validated as PDF. Provide url or messageId (at least one). If both are given, url takes precedence.',
+  description: 'Fetch a per-receipt invoice/receipt PDF download link from an email body and save it. Only allowlisted hosts (default: Stripe) over HTTPS; the response must be a real PDF (%PDF verified) — image, logo and other asset links are never fetched. Fallback for receipts without PDF attachments. Provide url or messageId (at least one). If both are given, url takes precedence.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -46,7 +47,7 @@ export const fetchBillingPdfSchema = {
 
 export const extractReceiptSchema = {
   name: 'outlook_extract_receipt',
-  description: 'Extract a compact structured summary (vendor, amount, currency, receipt/invoice numbers, product label, billing link, attachment ids) from a receipt email — instead of its large HTML body.',
+  description: 'Extract a compact structured summary from a receipt email instead of its large HTML body: vendor, amounts (subtotal, tax, credits, total, amount paid, currency), line items, receipt/invoice/order numbers, product label, reply/forward flag with normalised subject and quoted original sender, invoice and receipt PDF links (tracking unwrapped, allowlisted hosts only), and attachment ids.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -75,7 +76,7 @@ export const renderEmailPdfSchema = {
 
 export const collectReceiptsSchema = {
   name: 'outlook_collect_receipts',
-  description: 'Collect all vendor receipts for a period in one call: discovers each vendor\'s receipt emails by sender/subject/date across the whole mailbox, saves each PDF (attachment, allowlisted link, or rendered fallback) with deterministic names, and returns a manifest plus a missing[] list. Idempotent on re-runs.',
+  description: 'Collect all vendor receipts for a period in one call. Discovers each vendor\'s receipt emails by sender/subject/date across the whole mailbox (Sent Items and Drafts excluded; a message found by several rules is processed once), assigns each message to exactly one rule, collapses copies of one receipt (same receipt/invoice/order number, or identical PDF bytes) and saves one PDF per receipt with deterministic names: the PDF attachment, else a per-receipt allowlisted link, else a rendering of the email. Every manifest entry has a status: saved, skipped (file already on disk), not_found, fetch_failed, ambiguous (several rules claim it, or its product cannot be determined; candidates listed) or duplicate (duplicate_of names the receipt number or sha256). Entries carry sender, a forwarded flag and originalSender for forwards, and structured amounts (subtotal, tax, credits, total, currency) read from the saved PDF when it parses, else from the email (amountSource; amountMismatch when they disagree). When the formal invoice cannot be fetched the entry stays fetch_failed with a renderedFallback copy that is marked as not the formal invoice. Returns { period, manifest, missing (not_found vendors), failed (one object per fetch_failed entry with the attempted route, ids and Graph error), summary (count per status), notes }. Idempotent on re-runs.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -89,7 +90,15 @@ export const collectReceiptsSchema = {
           properties: {
             vendor: { type: 'string', description: 'Vendor label used in filenames and the manifest, e.g. "Acme"' },
             from: { type: 'string', description: 'Sender email to match, e.g. billing@acme.example' },
-            subjectContains: { type: 'string', description: 'Substring the subject must contain' },
+            subjectContains: { type: 'string', description: 'Substring the subject must contain (Re:/Fw: prefixes are ignored)' },
+            productContains: {
+              oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+              description: 'Only receipts for these products: at least one term must appear (case-insensitive substring) in the receipt\'s product label or a line-item description. Use with productExcludes to split one sender into several vendors. A rule with productContains wins over a rule without product matchers; a receipt whose product cannot be determined is reported as ambiguous, never guessed.'
+            },
+            productExcludes: {
+              oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+              description: 'Skip receipts for these products: none of the terms may appear (case-insensitive substring) in the receipt\'s product label or any line-item description.'
+            },
             prefer: { type: 'string', enum: ['invoice', 'receipt', 'first'], description: 'Which PDF to auto-select when several are attached', default: 'invoice' },
             filenameTemplate: { type: 'string', description: 'Overrides RECEIPT_FILENAME_TEMPLATE, default "{vendor} {DDMmmYY} Invoice.pdf"' },
             expectedCurrency: { type: 'string', description: 'ISO currency to sanity-check, e.g. GBP' }
