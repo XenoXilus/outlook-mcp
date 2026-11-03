@@ -2,8 +2,11 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import { createRequire, syncBuiltinESMExports } from 'module';
 import { fileURLToPath } from 'url';
-import { extractPdfText, parseReceiptPdf, MAX_PDF_BYTES, MAX_PDF_PAGES } from '../../tools/receipts/receiptPdfText.js';
+import {
+  extractPdfText, parseReceiptPdf, MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_TEXT_CHARS, MEMORY_LIMIT_MB
+} from '../../tools/receipts/receiptPdfText.js';
 import { makePdf, hostilePdf } from '../fixtures/receipts/makePdf.js';
 
 // Fictional PDFs rendered from the .html files beside them (see the comment at the top of each).
@@ -51,8 +54,8 @@ describe('receiptPdfText', () => {
     it('keeps pdfjs warnings off stdout (the MCP transport) and restores console.log', async () => {
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      await extractPdfText(fixture('acme-invoice-uk.pdf'));
-      await expect(extractPdfText(Buffer.from('%PDF-1.4\ngarbage'))).rejects.toThrow();
+      await extractPdfText(fixture('acme-invoice-uk.pdf'), { verbosity: 1 }); // warnings are off by default
+      await expect(extractPdfText(Buffer.from('%PDF-1.4\ngarbage'), { verbosity: 1 })).rejects.toThrow();
       expect(logSpy).not.toHaveBeenCalled();
       expect(errSpy.mock.calls.some(args => String(args[0]).startsWith('Warning'))).toBe(true);
       expect(console.log).toBe(logSpy);
@@ -131,7 +134,7 @@ describe('receiptPdfText', () => {
       const ticker = setInterval(() => { ticks++; }, 25);
       const started = Date.now();
       try {
-        await expect(extractPdfText(pdf, { timeoutMs: 500 }))
+        await expect(extractPdfText(pdf, { timeoutMs: 500, maxChars: Infinity })) // uncapped: the parse must outlast 500 ms
           .rejects.toThrow(/Cannot extract text from PDF: timed out after 500ms/);
       } finally {
         clearInterval(ticker);
@@ -141,10 +144,10 @@ describe('receiptPdfText', () => {
     });
 
     it('rejects a PDF over the byte cap without parsing it', async () => {
-      expect(MAX_PDF_BYTES).toBe(15 * 1024 * 1024);
+      expect(MAX_PDF_BYTES).toBe(10 * 1024 * 1024);
       const huge = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(MAX_PDF_BYTES)]);
       const started = Date.now();
-      await expect(extractPdfText(huge)).rejects.toThrow(/Cannot extract text from PDF: .*15 MB/);
+      await expect(extractPdfText(huge)).rejects.toThrow(/Cannot extract text from PDF: .*10 MB/);
       expect(Date.now() - started).toBeLessThan(250);
     });
 
@@ -191,7 +194,12 @@ describe('receiptPdfText', () => {
                 calls.pages.push(n);
                 if (n === failOnPage) throw new Error('bad page');
                 return {
-                  getTextContent: async () => ({ items: [{ str: `p${n}`, transform: [1, 0, 0, 1, 0, n] }] }),
+                  streamTextContent: () => new ReadableStream({
+                    start(controller) {
+                      controller.enqueue({ items: [{ str: `p${n}`, transform: [1, 0, 0, 1, 0, n] }] });
+                      controller.close();
+                    }
+                  }),
                   cleanup: () => {}
                 };
               }
@@ -222,7 +230,7 @@ describe('receiptPdfText', () => {
         let ticks = 0;
         const ticker = setInterval(() => { ticks++; }, 25);
         const started = Date.now();
-        const outcome = await extractPdfText(hostilePdf(), { timeoutMs: 500 }).then(() => 'RESOLVED', (e) => e.message);
+        const outcome = await extractPdfText(hostilePdf(), { timeoutMs: 500, maxChars: Infinity }).then(() => 'RESOLVED', (e) => e.message);
         clearInterval(ticker);
         console.log(JSON.stringify({ ok: ok.includes('ZZ-0001'), outcome, elapsed: Date.now() - started, ticks }));
       `], { cwd: repoRoot, encoding: 'utf8', timeout: 25000, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -231,6 +239,161 @@ describe('receiptPdfText', () => {
       expect(result.outcome).toMatch(/timed out after 500ms/);
       expect(result.elapsed).toBeLessThan(1500);
       expect(result.ticks).toBeGreaterThanOrEqual(8);
+    });
+  });
+
+  describe('resource limits', () => {
+    const MB = 1024 * 1024;
+    /** A tiny PDF whose one content stream is `mb` MB of spaces, Flate-compressed ~1000:1. */
+    const spacesPdf = (mb) => makePdf({ streams: [Buffer.alloc(mb * MB, 0x20)] });
+    /** A tiny PDF whose content stream is `n` operator-less `Tj`s: one pdfjs warning each. */
+    const warningPdf = (n) => makePdf({ streams: [`BT /F1 10 Tf\n${'Tj\n'.repeat(n)}ET`] });
+    const stderrLines = (spy) => spy.mock.calls.map((args) => String(args[0]));
+
+    /** Replace worker_threads.Worker with a subclass that counts constructions and concurrent live workers. */
+    const trackWorkers = () => {
+      const wt = createRequire(import.meta.url)('node:worker_threads');
+      const RealWorker = wt.Worker;
+      const stats = { created: 0, live: 0, maxLive: 0 };
+      wt.Worker = class extends RealWorker {
+        constructor(...args) {
+          super(...args);
+          stats.created++;
+          stats.maxLive = Math.max(stats.maxLive, ++stats.live);
+          this.on('exit', () => { stats.live--; });
+        }
+      };
+      syncBuiltinESMExports();
+      stats.restore = () => { wt.Worker = RealWorker; syncBuiltinESMExports(); };
+      return stats;
+    };
+
+    it('defaults: 384 MB growth cap, 10 MB input cap', () => {
+      expect(MEMORY_LIMIT_MB).toBe(384);
+      expect(MAX_PDF_BYTES).toBe(10 * MB);
+    });
+
+    it('terminates a parse whose memory growth exceeds the cap (a ~100 KB PDF that inflates to 64 MB of spaces)', async () => {
+      const pdf = spacesPdf(64);
+      expect(pdf.length).toBeLessThan(200 * 1024);
+      const started = Date.now();
+      await expect(extractPdfText(pdf, { timeoutMs: 20000, memoryLimitMb: 24 }))
+        .rejects.toThrow(/Cannot extract text from PDF: .*memory limit/);
+      expect(Date.now() - started).toBeLessThan(10000);
+    });
+
+    it('parses the same PDF when its memory growth stays under the cap', async () => {
+      expect(await extractPdfText(spacesPdf(8), { timeoutMs: 20000 })).toBe('');
+    });
+
+    it('polls memory with an unref\'d interval that is cleared when the parse ends, however it ends', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const intervals = [];
+      const realSetInterval = globalThis.setInterval;
+      vi.spyOn(globalThis, 'setInterval').mockImplementation((...args) => {
+        const timer = realSetInterval(...args);
+        intervals.push(timer);
+        return timer;
+      });
+      const memorySpy = vi.spyOn(process, 'memoryUsage');
+
+      await extractPdfText(fixture('acme-invoice-uk.pdf'));
+      await expect(extractPdfText(hostilePdf(), { timeoutMs: 300, maxChars: Infinity })).rejects.toThrow(/timed out/);
+      await expect(extractPdfText(Buffer.from('%PDF-1.4\ngarbage'))).rejects.toThrow();
+
+      expect(intervals.length).toBeGreaterThanOrEqual(3);
+      for (const timer of intervals) expect(timer.hasRef()).toBe(false);
+      const callsAtEnd = memorySpy.mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 200)); // four poll intervals
+      expect(memorySpy.mock.calls.length).toBe(callsAtEnd); // nothing is still polling
+    });
+
+    it('runs at most one PDF worker at a time, and a failure does not block the queue', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const stats = trackWorkers();
+      try {
+        const results = await Promise.allSettled([
+          extractPdfText(fixture('acme-invoice-uk.pdf')),
+          extractPdfText(Buffer.from('%PDF-1.4\ngarbage')),
+          extractPdfText(fixture('globex-receipt-usage.pdf')),
+          extractPdfText(makePdf({ pages: [['Queued last']] }))
+        ]);
+        expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected', 'fulfilled', 'fulfilled']);
+        expect(results[3].value).toContain('Queued last');
+        expect(stats.created).toBe(4); // the hook saw every worker
+        expect(stats.maxLive).toBe(1);
+      } finally {
+        stats.restore();
+      }
+    });
+
+    it('starts a queued parse\'s timeout when its worker starts, not while it waits', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const [slow, quick] = await Promise.allSettled([
+        extractPdfText(hostilePdf(), { timeoutMs: 600, maxChars: Infinity }), // occupies the worker for its full 600 ms
+        extractPdfText(fixture('acme-invoice-uk.pdf'), { timeoutMs: 400 })
+      ]);
+      expect(slow.status).toBe('rejected');
+      expect(quick.status).toBe('fulfilled');
+      expect(quick.value).toContain('ZQXV9876-0042');
+    });
+
+    it('stops extracting at the text cap instead of materialising a whole hostile page', async () => {
+      expect(MAX_TEXT_CHARS).toBe(1024 * 1024);
+      const started = Date.now();
+      const text = await extractPdfText(hostilePdf(), { timeoutMs: 20000, maxChars: 500 });
+      expect(text.length).toBe(500);
+      expect(text.startsWith('\nAB\nCD')).toBe(true);
+      expect(Date.now() - started).toBeLessThan(5000);
+    });
+
+    it('does not read further pages once the text cap is reached', async () => {
+      const pages = Array.from({ length: 5 }, (_, i) => [`Marker ${i + 1} ${'x'.repeat(100)}`]);
+      const text = await extractPdfText(makePdf({ pages }), { maxChars: 150 });
+      expect(text).toContain('Marker 1');
+      expect(text).toContain('Marker 2');
+      expect(text).not.toContain('Marker 3');
+      expect(text.length).toBe(150);
+    });
+
+    describe('pdfjs warnings', () => {
+      it('are off by default: a 900-byte PDF of 50,000 bad operators writes nothing to stderr', async () => {
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const pdf = warningPdf(50000);
+        expect(pdf.length).toBeLessThan(2048);
+        await extractPdfText(pdf);
+        expect(stderrLines(errSpy)).toEqual([]);
+      });
+
+      it('are relayed at most 10 times per parse, then summarised in one line', async () => {
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const started = Date.now();
+        await extractPdfText(warningPdf(50000), { verbosity: 1 });
+        const lines = stderrLines(errSpy);
+        expect(lines.length).toBe(11);
+        expect(lines.slice(0, 10).every((l) => l.startsWith('Warning: '))).toBe(true);
+        expect(lines[10]).toMatch(/^Warning: (\d+) further pdfjs warnings suppressed$/);
+        expect(Number(lines[10].match(/\d+/)[0])).toBeGreaterThan(40000);
+        expect(Date.now() - started).toBeLessThan(10000);
+      });
+
+      it('stay silent about the cap when a parse emits few warnings', async () => {
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        await extractPdfText(warningPdf(3), { verbosity: 1 });
+        const lines = stderrLines(errSpy);
+        expect(lines.length).toBeGreaterThan(0);
+        expect(lines.length).toBeLessThanOrEqual(10);
+        expect(lines.some((l) => /suppressed/.test(l))).toBe(false);
+      });
+
+      it('a flood that runs into the timeout still costs the main thread at most 11 lines and no extra time', async () => {
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const started = Date.now();
+        await expect(extractPdfText(makePdf({ streams: [`BT\n${'Tj\n'.repeat(3000000)}ET`] }), { verbosity: 1, timeoutMs: 300 }))
+          .rejects.toThrow(/timed out after 300ms/);
+        expect(Date.now() - started).toBeLessThan(1500);
+        expect(stderrLines(errSpy).length).toBeLessThanOrEqual(11);
+      });
     });
   });
 });
