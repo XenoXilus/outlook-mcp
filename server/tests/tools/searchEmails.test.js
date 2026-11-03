@@ -41,27 +41,29 @@ describe('searchEmailsTool KQL query construction', () => {
     });
 
     expect(makeRequest.mock.calls[0][0]).toBe('/me/messages');
-    expect(options.search).toBe(sent('receipt AND received:2026-10-01..2026-10-31'));
+    // widened by one day on each side; the client-side guard trims to the exact window
+    expect(options.search).toBe(sent('receipt AND received:2026-09-30..2026-11-01'));
     expect(options.search.slice(1, -1)).not.toContain('"');
     // $filter / $orderby cannot be combined with $search on messages
     expect(options.filter).toBeUndefined();
     expect(options.orderby).toBeUndefined();
     expect(payload.searchSummary.searchApproach).toMatch(/KQL/);
     expect(payload.searchSummary.kqlQuery).toBe(options.search);
-    expect(payload.searchSummary.parameters.dateRange).toBe('KQL: received:2026-10-01..2026-10-31');
+    expect(payload.searchSummary.parameters.dateRange).toBe('KQL: received:2026-09-30..2026-11-01');
+    expect(payload.searchSummary.kqlWindowWidened).toBe(true);
   });
 
   it('accepts date-only bounds', async () => {
     const { options } = await search({ query: 'receipt', startDate: '2026-10-01', endDate: '2026-10-31' });
-    expect(options.search).toBe(sent('receipt AND received:2026-10-01..2026-10-31'));
+    expect(options.search).toBe(sent('receipt AND received:2026-09-30..2026-11-01'));
   });
 
   it('uses comparison operators for one-sided ranges', async () => {
     const startOnly = await search({ query: 'receipt', startDate: '2026-10-01T00:00:00Z' });
-    expect(startOnly.options.search).toBe(sent('receipt AND received>=2026-10-01'));
+    expect(startOnly.options.search).toBe(sent('receipt AND received>=2026-09-30'));
 
     const endOnly = await search({ query: 'receipt', endDate: '2026-10-31' });
-    expect(endOnly.options.search).toBe(sent('receipt AND received<=2026-10-31'));
+    expect(endOnly.options.search).toBe(sent('receipt AND received<=2026-11-01'));
   });
 
   it('takes the UTC date part of offset date-times', async () => {
@@ -70,8 +72,8 @@ describe('searchEmailsTool KQL query construction', () => {
       startDate: '2026-10-01T23:30:00-05:00',
       endDate: '2026-11-01T01:00:00+02:00'
     });
-    // 2026-10-02T04:30Z .. 2026-10-31T23:00Z
-    expect(options.search).toBe(sent('receipt AND received:2026-10-02..2026-10-31'));
+    // 2026-10-02T04:30Z .. 2026-10-31T23:00Z, widened by one day on each side
+    expect(options.search).toBe(sent('receipt AND received:2026-10-01..2026-11-01'));
   });
 
   it('does not depend on the host timezone', async () => {
@@ -87,7 +89,7 @@ describe('searchEmailsTool KQL query construction', () => {
         });
         queries.push(options.search);
       }
-      expect(new Set(queries)).toEqual(new Set([sent('receipt AND received:2026-10-01..2026-10-31')]));
+      expect(new Set(queries)).toEqual(new Set([sent('receipt AND received:2026-09-30..2026-11-01')]));
     } finally {
       if (savedTz === undefined) delete process.env.TZ;
       else process.env.TZ = savedTz;
@@ -137,7 +139,7 @@ describe('searchEmailsTool KQL query construction', () => {
       endDate: '2026-10-31'
     });
     expect(options.search).toBe(sent(
-      'receipt AND from:billing@vendor.example.com AND subject:statement AND received:2026-10-01..2026-10-31'
+      'receipt AND from:billing@vendor.example.com AND subject:statement AND received:2026-09-30..2026-11-01'
     ));
     expect(payload.searchSummary.parameters.sender).toBe('KQL: from:billing@vendor.example.com');
     expect(payload.searchSummary.parameters.subject).toBe('KQL: subject:statement');
@@ -155,6 +157,52 @@ describe('searchEmailsTool KQL query construction', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/startDate/);
     expect(makeRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe('searchEmailsTool KQL date window widening', () => {
+  it('reports exactly what was sent and flags the widening', async () => {
+    const { options, payload } = await search({ query: 'receipt', startDate: '2026-10-01', endDate: '2026-10-31' });
+    expect(payload.searchSummary.kqlQuery).toBe(options.search);
+    expect(payload.searchSummary.kqlWindowWidened).toBe(true);
+  });
+
+  it('widens a one-sided range on its open side only', async () => {
+    const startOnly = await search({ query: 'receipt', startDate: '2026-03-01' });
+    expect(startOnly.options.search).toBe(sent('receipt AND received>=2026-02-28'));
+    expect(startOnly.payload.searchSummary.kqlWindowWidened).toBe(true);
+
+    const endOnly = await search({ query: 'receipt', endDate: '2026-12-31' });
+    expect(endOnly.options.search).toBe(sent('receipt AND received<=2027-01-01'));
+    expect(endOnly.payload.searchSummary.kqlWindowWidened).toBe(true);
+  });
+
+  it('is not flagged when there is no date restriction or no KQL search', async () => {
+    const noDates = await search({ query: 'receipt' });
+    expect(noDates.options.search).toBe(sent('receipt'));
+    expect(noDates.payload.searchSummary.kqlWindowWidened).toBeUndefined();
+
+    const odata = await search({ from: 'billing@vendor.example.com', startDate: '2026-10-01', endDate: '2026-10-31' });
+    expect(odata.options.search).toBeUndefined();
+    expect(odata.payload.searchSummary.kqlWindowWidened).toBeUndefined();
+  });
+
+  it('keeps a message on the requested end day and drops one a day later', async () => {
+    // A service that honours the widened window returns the boundary days too
+    const value = [
+      message('day-before-start', '2026-09-30T20:00:00Z'),
+      message('on-start-day', '2026-10-01T00:30:00Z'),
+      message('on-end-day', '2026-10-31T22:00:00Z'),
+      message('day-after-end', '2026-11-01T09:00:00Z')
+    ];
+    const { options, payload } = await search(
+      { query: 'receipt', startDate: '2026-10-01', endDate: '2026-10-31' },
+      () => ({ value })
+    );
+
+    expect(options.search).toBe(sent('receipt AND received:2026-09-30..2026-11-01'));
+    expect(idsOf(payload)).toEqual(['on-start-day', 'on-end-day']);
+    expect(payload.searchSummary.droppedOutsideFilters).toBe(2);
   });
 });
 
@@ -176,7 +224,7 @@ describe('searchEmailsTool result guard (KQL mode)', () => {
     expect(idsOf(payload)).toEqual(['start-edge', 'mid', 'end-edge']);
     expect(payload.searchSummary.totalResults).toBe(3);
     expect(payload.searchSummary.droppedOutsideFilters).toBe(4);
-    expect(payload.searchSummary.kqlQuery).toBe(sent('receipt AND received:2026-10-01..2026-10-31'));
+    expect(payload.searchSummary.kqlQuery).toBe(sent('receipt AND received:2026-09-30..2026-11-01'));
 
     const from = Date.parse(window.startDate);
     const to = Date.parse(window.endDate);
@@ -272,6 +320,59 @@ describe('searchEmailsTool result guard (KQL mode)', () => {
 
     expect(idsOf(payload)).toEqual(['a', 'b']);
     expect(payload.searchSummary.droppedOutsideFilters).toBe(0);
+  });
+
+  it('warns that results may be incomplete when messages had to be dropped', async () => {
+    const value = [
+      message('in', '2026-10-15T00:00:00Z'),
+      message('out-1', '2026-08-15T00:00:00Z'),
+      message('out-2', '2026-12-15T00:00:00Z')
+    ];
+    const { payload } = await search({ query: 'receipt', limit: 3, ...window }, () => ({ value }));
+
+    const { warning, droppedOutsideFilters } = payload.searchSummary;
+    expect(droppedOutsideFilters).toBe(2);
+    expect(warning).toContain('returned 2 messages outside the requested filters');
+    expect(warning).toContain('removed');
+    expect(warning).toContain('smaller than the requested limit');
+    expect(warning).toContain('possibly incomplete');
+    expect(warning).toMatch(/narrow the date window or raise limit/);
+  });
+
+  it('uses the singular for one dropped message', async () => {
+    const value = [message('in', '2026-10-15T00:00:00Z'), message('out', '2026-08-15T00:00:00Z')];
+    const { payload } = await search({ query: 'receipt', ...window }, () => ({ value }));
+    expect(payload.searchSummary.warning).toContain('returned 1 message outside the requested filters');
+    expect(payload.searchSummary.warning).toContain('it was removed');
+  });
+
+  it('does not warn about margin-day messages the widened KQL window returns by design', async () => {
+    const value = [
+      message('in', '2026-10-15T00:00:00Z'),
+      message('margin-before', '2026-09-30T12:00:00Z'),
+      message('margin-after', '2026-11-01T12:00:00Z')
+    ];
+    const { payload } = await search({ query: 'receipt', ...window }, () => ({ value }));
+    expect(payload.searchSummary.droppedOutsideFilters).toBe(2);
+    expect(payload.searchSummary.warning).toBeUndefined();
+    expect(payload.emails.map(e => e.id)).toEqual(['in']);
+  });
+
+  it('has no warning when nothing was dropped', async () => {
+    const value = [message('in', '2026-10-15T00:00:00Z')];
+    const { payload } = await search({ query: 'receipt', ...window }, () => ({ value }));
+    expect(payload.searchSummary.droppedOutsideFilters).toBe(0);
+    expect(payload.searchSummary.warning).toBeUndefined();
+  });
+
+  it('also warns for a folder ($filter) search', async () => {
+    const value = [
+      message('in', '2026-10-15T00:00:00Z'),
+      message('out', '2026-08-15T00:00:00Z')
+    ];
+    const { payload } = await search({ folders: ['Receipts'], ...window }, () => ({ value }));
+    expect(idsOf(payload)).toEqual(['in']);
+    expect(payload.searchSummary.warning).toContain('returned 1 message outside the requested filters');
   });
 });
 

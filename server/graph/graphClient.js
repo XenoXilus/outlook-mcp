@@ -96,6 +96,52 @@ function describeRequestUrl(request, fallback) {
   return fallback;
 }
 
+const REQUEST_BODY_LOG_LIMIT = 2000;
+const REDACTED = '[redacted]';
+const BODY_METHODS = new Set(['POST', 'PATCH', 'PUT']);
+// Header names that carry credentials; a value that looks like a scheme + credential is covered too.
+const SENSITIVE_HEADER_NAME = /authori[sz]ation|cookie|token|secret|password|api[-_]?key|session/i;
+const CREDENTIAL_VALUE = /^\s*(?:bearer|basic)\s/i;
+
+function truncateForLog(value, limit = REQUEST_BODY_LOG_LIMIT) {
+  return value.length > limit ? `${value.slice(0, limit)}... [truncated, ${value.length} chars total]` : value;
+}
+
+/**
+ * The request as it should appear in a failure log: method, full URL, headers
+ * and (for POST/PATCH/PUT) the JSON body cut to ~2,000 characters. Credential
+ * headers are shown as "[redacted]" and the token is never read. The SDK adds
+ * Authorization when the request is sent, so it is listed explicitly (redacted)
+ * rather than looked up.
+ */
+export function describeFailedRequest(request, { method, path, body } = {}) {
+  const headers = { Authorization: REDACTED };
+  const own = request && typeof request === 'object' ? request._headers : null;
+  if (own && typeof own === 'object') {
+    for (const [name, value] of Object.entries(own)) {
+      headers[name] = SENSITIVE_HEADER_NAME.test(name) || CREDENTIAL_VALUE.test(String(value)) ? REDACTED : String(value);
+    }
+  }
+
+  const verb = String(method || 'GET').toUpperCase();
+  const described = { method: verb, url: describeRequestUrl(request, path), headers };
+  if (BODY_METHODS.has(verb)) {
+    if (Buffer.isBuffer(body) || body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+      described.body = `[binary body, ${body.byteLength} bytes]`;
+    } else {
+      let serialised;
+      try {
+        // safeStringify also redacts secret-named keys inside the body
+        serialised = safeStringify(body ?? {}, 0);
+      } catch {
+        serialised = null;
+      }
+      described.body = typeof serialised === 'string' ? truncateForLog(serialised) : '[body could not be serialised]';
+    }
+  }
+  return described;
+}
+
 export class GraphApiClient {
   constructor(authManager) {
     this.authManager = authManager;
@@ -257,6 +303,16 @@ export class GraphApiClient {
     return errorDetails;
   }
 
+  // stderr only (never part of the MCP error returned to the caller)
+  logFailedRequest(request, method, path, options = {}) {
+    try {
+      const details = describeFailedRequest(request, { method, path, body: options.body || {} });
+      console.error('Failed request:', JSON.stringify(details, null, 2));
+    } catch (logError) {
+      console.error('Failed request could not be described:', logError.message);
+    }
+  }
+
   async makeRequest(path, options = {}, method = 'GET') {
     await this.initialize();
     
@@ -371,6 +427,7 @@ export class GraphApiClient {
             }
             continue;
           } else {
+            this.logFailedRequest(request, method, path, options);
             // Return rate limit error instead of throwing
             return createRateLimitError(Math.ceil(waitTime / 1000));
           }
@@ -387,6 +444,7 @@ export class GraphApiClient {
             delay = Math.min(delay * authConfig.retry.backoffMultiplier, authConfig.retry.maxDelay);
             continue;
           } else {
+            this.logFailedRequest(request, method, path, options);
             // Return service unavailable error instead of throwing
             return createServiceUnavailableError('Microsoft Graph API');
           }
@@ -409,6 +467,7 @@ export class GraphApiClient {
         // Log final error and return MCP error
         console.error(`Graph API error: ${method} ${errorDetails.url} [correlation: ${clientRequestId}]`);
         console.error('Error details:', safeStringify(errorDetails, 2));
+        this.logFailedRequest(request, method, path, options);
         
         return this.handleGraphError(error, errorDetails);
       }
@@ -435,10 +494,13 @@ export class GraphApiClient {
       })),
     };
 
+    let request = null;
     try {
-      const response = await this.client.api('/$batch').post(batchContent);
+      request = this.client.api('/$batch');
+      const response = await request.post(batchContent);
       return response.responses;
     } catch (error) {
+      this.logFailedRequest(request, 'POST', '/$batch', { body: batchContent });
       return this.handleGraphError(error, this.extractErrorDetails(error, null, '/$batch', 'POST'));
     }
   }

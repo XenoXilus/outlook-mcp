@@ -14,6 +14,8 @@ const HAS_UTC_OFFSET = /(?:Z|[+-]\d{2}:?\d{2})$/i;
 // characters are KQL syntax. A value containing any of them has to be quoted.
 const KQL_NEEDS_QUOTES = /[\s"():<>=]/;
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 const text = (value) => String(value ?? '').trim();
 
 // Epoch millis for a date or date-time. Date-only and zone-less input is read
@@ -27,8 +29,9 @@ function toUtcMillis(value) {
 
 // KQL date operand: the UTC calendar date as YYYY-MM-DD, independent of the
 // host's locale and timezone (toLocaleDateString is both, and M/D/YYYY is ambiguous).
-function toKqlDate(value) {
-  return new Date(toUtcMillis(value)).toISOString().slice(0, 10);
+// `offsetDays` shifts the calendar date (UTC days are a fixed 24 hours).
+function toKqlDate(value, offsetDays = 0) {
+  return new Date(toUtcMillis(value) + offsetDays * DAY_MS).toISOString().slice(0, 10);
 }
 
 // A KQL value is quoted only when it needs to be. Inner quotes are dropped:
@@ -39,17 +42,23 @@ function toKqlValue(value) {
 }
 
 // KQL clauses for each requested restriction. Property restrictions stay
-// unquoted (`from:value`, `received:2026-10-01..2026-10-31`): KQL reads a
+// unquoted (`from:value`, `received:2026-09-30..2026-11-01`): KQL reads a
 // quoted `received:...` as a literal phrase, not a property restriction, and
 // only the value after the colon may be quoted.
+//
+// Whether the service treats the end day of a `received:` range as inclusive,
+// and in which time zone it evaluates the dates, is not something we can rely
+// on. The date restriction is therefore widened by one day on each side (start
+// minus one day, end plus one day) so no message in the requested window can
+// be missed; the client-side guard trims the result to the exact window.
 function buildKqlClauses({ queryText, fromText, subjectText, startBound, endBound }) {
   let received = null;
   if (startBound && endBound) {
-    received = `received:${toKqlDate(startBound)}..${toKqlDate(endBound)}`;
+    received = `received:${toKqlDate(startBound, -1)}..${toKqlDate(endBound, 1)}`;
   } else if (startBound) {
-    received = `received>=${toKqlDate(startBound)}`;
+    received = `received>=${toKqlDate(startBound, -1)}`;
   } else if (endBound) {
-    received = `received<=${toKqlDate(endBound)}`;
+    received = `received<=${toKqlDate(endBound, 1)}`;
   }
 
   return {
@@ -272,6 +281,20 @@ export async function searchEmailsTool(authManager, args) {
     let messages = fetched.filter(matchesRestrictions);
     const droppedOutsideFilters = fetched.length - messages.length;
 
+    // A widened KQL window returns the margin days by design; only drops the
+    // widening does not explain mean the service ignored a restriction.
+    const kqlWindowWidened = useKQLSearch && Boolean(kql.received);
+    let unexpectedDrops = droppedOutsideFilters;
+    if (kqlWindowWidened) {
+      const withinMargin = buildRestrictionGuard({
+        fromText,
+        subjectText,
+        startBound: startBound ? toKqlDate(startBound, -1) : '',
+        endBound: endBound ? toKqlDate(endBound, 1) : ''
+      });
+      unexpectedDrops = fetched.filter(message => !withinMargin(message)).length;
+    }
+
     if (endpoints.length > 1) {
       messages = messages.sort(compareByOrderBy(orderBy)).slice(0, options.top);
     }
@@ -348,6 +371,12 @@ export async function searchEmailsTool(authManager, args) {
       },
       totalResults: emails.length,
       droppedOutsideFilters,
+      ...(kqlWindowWidened && { kqlWindowWidened: true }),
+      ...(unexpectedDrops > 0 && {
+        warning: `The service returned ${unexpectedDrops} message${unexpectedDrops === 1 ? '' : 's'} outside the requested filters; ` +
+          `${unexpectedDrops === 1 ? 'it was' : 'they were'} removed, so the result may be smaller than the requested limit ` +
+          '(results possibly incomplete - narrow the date window or raise limit).'
+      }),
       includesFullBody: includeBody,
       limitWasCapped: limitWasCapped,
       optimization: useKQLSearch ? 'Using KQL for text-based search (efficient for content search)' :

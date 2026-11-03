@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { GraphError } from '@microsoft/microsoft-graph-client';
-import { GraphApiClient, readHeader, parseGraphErrorBody } from '../../graph/graphClient.js';
+import { GraphApiClient, readHeader, parseGraphErrorBody, describeFailedRequest } from '../../graph/graphClient.js';
 import { convertErrorToToolError, formatGraphErrorText } from '../../utils/mcpErrorResponse.js';
 import { installFakeGraphFetch, graphJsonResponse, graphBinaryResponse } from '../helpers/mockGraph.js';
 
@@ -164,6 +164,122 @@ describe('GraphApiClient failure details', () => {
     const error = new GraphError(429, 'Too many requests');
     error.headers = new Headers({ 'retry-after': '7' });
     expect(client.extractRetryAfter(error)).toBe(7000);
+  });
+});
+
+describe('GraphApiClient failure log (stderr)', () => {
+  let fake, client, errorSpy;
+
+  beforeEach(() => {
+    client = newClient();
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    fake?.restore();
+    errorSpy.mockRestore();
+  });
+
+  const loggedText = () => errorSpy.mock.calls.map((args) => args.map(String).join(' ')).join('\n');
+  const loggedRequest = () => {
+    const call = errorSpy.mock.calls.find((args) => args[0] === 'Failed request:');
+    return call ? JSON.parse(call[1]) : null;
+  };
+  const failWith400 = () => installFakeGraphFetch(() => graphJsonResponse(400, {
+    error: { code: 'BadRequest', message: 'bad request body' }
+  }));
+
+  it('includes method, full URL, redacted headers and the JSON body, and never the token', async () => {
+    fake = failWith400();
+    const body = { message: { subject: 'Quarterly summary', toRecipients: [{ emailAddress: { address: 'someone@example.com' } }] } };
+
+    const result = await client.makeRequest('/me/sendMail', { body }, 'POST');
+
+    expect(result.isError).toBe(true);
+    const logged = loggedRequest();
+    expect(logged.method).toBe('POST');
+    expect(logged.url).toBe('https://graph.microsoft.com/v1.0/me/sendMail');
+    expect(logged.headers.Authorization).toBe('[redacted]');
+    expect(logged.headers['client-request-id']).toBe(fake.requests[0].headers.get('client-request-id'));
+    expect(logged.body).toBe(JSON.stringify(body));
+
+    // The token really went out on the wire, and appears nowhere in stderr or in the returned error
+    expect(fake.requests[0].headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+    expect(loggedText()).not.toContain(TOKEN);
+    expect(loggedText().toLowerCase()).not.toContain('bearer');
+    expect(JSON.stringify(result)).not.toContain(TOKEN);
+    // The request detail is a log-only addition: the MCP error text stays as before
+    expect(result.content[0].text).not.toContain('Quarterly summary');
+    expect(result.content[0].text.toLowerCase()).not.toContain('authorization');
+  });
+
+  it('keeps the existing error logging alongside the request', async () => {
+    fake = failWith400();
+    await client.makeRequest('/me/sendMail', { body: { a: 1 } }, 'POST');
+    const text = loggedText();
+    expect(text).toContain('Error details:');
+    expect(text).toContain('Graph API Error - Full Details:');
+    expect(text).toContain('Failed request:');
+  });
+
+  it.each(['POST', 'PATCH', 'PUT'])('truncates a long %s body to about 2,000 characters', async (method) => {
+    fake = failWith400();
+    const body = { content: 'x'.repeat(5000) };
+
+    await client.makeRequest('/me/messages/m1', { body }, method);
+
+    const logged = loggedRequest();
+    expect(logged.method).toBe(method);
+    expect(logged.body.startsWith(JSON.stringify(body).slice(0, 2000))).toBe(true);
+    expect(logged.body).toContain('truncated');
+    expect(logged.body).not.toContain('x'.repeat(2001));
+    expect(logged.body.length).toBeLessThan(2100);
+  });
+
+  it('logs the URL and headers of a GET but no body', async () => {
+    fake = failWith400();
+
+    await client.makeRequest('/me/messages', { select: 'id,subject', top: 5 });
+
+    const logged = loggedRequest();
+    expect(logged.method).toBe('GET');
+    expect(logged.url).toBe('https://graph.microsoft.com/v1.0/me/messages?$select=id,subject&$top=5');
+    expect(logged.headers.Authorization).toBe('[redacted]');
+    expect(logged).not.toHaveProperty('body');
+    expect(loggedText()).not.toContain(TOKEN);
+  });
+
+  it('redacts any credential-like header, by name or by value', () => {
+    const request = {
+      _headers: {
+        'client-request-id': 'cid-1',
+        Cookie: 'sid=abc123',
+        'X-Api-Key': 'key-abc123',
+        'X-Refresh-Token': 'refresh-abc123',
+        Authorization: `Bearer ${TOKEN}`,
+        'X-Custom': `Bearer ${TOKEN}`
+      },
+      buildFullUrl: () => 'https://graph.microsoft.com/v1.0/me/messages'
+    };
+
+    const described = describeFailedRequest(request, { method: 'get', path: '/me/messages' });
+
+    expect(described.method).toBe('GET');
+    expect(described.url).toBe('https://graph.microsoft.com/v1.0/me/messages');
+    expect(described.headers).toEqual({
+      'client-request-id': 'cid-1',
+      Cookie: '[redacted]',
+      'X-Api-Key': '[redacted]',
+      'X-Refresh-Token': '[redacted]',
+      Authorization: '[redacted]',
+      'X-Custom': '[redacted]'
+    });
+    expect(JSON.stringify(described)).not.toContain(TOKEN);
+  });
+
+  it('describes a binary body by size instead of dumping it', () => {
+    const described = describeFailedRequest({}, { method: 'PUT', path: '/me/drive/x', body: Buffer.alloc(4096, 1) });
+    expect(described.body).toBe('[binary body, 4096 bytes]');
+    expect(described.url).toBe('/me/drive/x');
   });
 });
 
