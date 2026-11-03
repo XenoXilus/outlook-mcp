@@ -15,6 +15,7 @@ const HAS_UTC_OFFSET = /(?:Z|[+-]\d{2}:?\d{2})$/i;
 const KQL_NEEDS_QUOTES = /[\s"():<>=]/;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_PAGE_SIZE = 1000;
 
 const text = (value) => String(value ?? '').trim();
 
@@ -154,8 +155,10 @@ export async function searchEmailsTool(authManager, args) {
     const graphApiClient = authManager.getGraphApiClient();
     const mailboxBase = getMailboxBase(mailbox);
 
+    // Number of messages the caller asked for (capped at 1000 for performance)
+    const resultLimit = Math.min(effectiveLimit, MAX_PAGE_SIZE);
     const options = {
-      top: Math.min(effectiveLimit, 1000) // Cap at 1000 for performance
+      top: resultLimit
       // orderby will be added conditionally after determining if search is used
     };
 
@@ -256,6 +259,12 @@ export async function searchEmailsTool(authManager, args) {
       // collections, so a date window cannot move to $filter here: it travels inside
       // the KQL, and the results are re-checked against it below.
       kql = buildKqlClauses({ queryText, fromText, subjectText, startBound, endBound });
+      if (kql.received) {
+        // The widened window also matches the margin-day messages the guard will drop
+        // again, and they use up page slots; ask for more than the limit so they
+        // cannot crowd out in-window messages (the result is trimmed to the limit below).
+        options.top = Math.min(Math.max(resultLimit * 2, resultLimit + 25), MAX_PAGE_SIZE);
+      }
       // Graph expects the whole KQL expression as one double-quoted $search value;
       // quotes inside it are backslash-escaped.
       const expression = [kql.text, kql.from, kql.subject, kql.received].filter(Boolean).join(' AND ');
@@ -264,6 +273,8 @@ export async function searchEmailsTool(authManager, args) {
 
     // Make the request(s) using chosen search strategy
     const fetched = [];
+    // A request that came back with a full page may have been cut off by the service
+    let receivedFullPage = false;
     for (const endpoint of endpoints) {
       const result = await graphApiClient.makeRequest(endpoint, options);
 
@@ -272,7 +283,9 @@ export async function searchEmailsTool(authManager, args) {
         return result;
       }
 
-      fetched.push(...(result.value || []));
+      const page = result.value || [];
+      if (page.length >= options.top) receivedFullPage = true;
+      fetched.push(...page);
     }
 
     // Defence in depth: whatever the service did with the query, never return a
@@ -295,8 +308,30 @@ export async function searchEmailsTool(authManager, args) {
       unexpectedDrops = fetched.filter(message => !withinMargin(message)).length;
     }
 
+    // The guard may have left more than the caller asked for (a widened window
+    // requests extra, and a merge of several folders can exceed it).
     if (endpoints.length > 1) {
-      messages = messages.sort(compareByOrderBy(orderBy)).slice(0, options.top);
+      messages = messages.sort(compareByOrderBy(orderBy));
+    }
+    messages = messages.slice(0, resultLimit);
+
+    // A full page with anything dropped means in-window messages may have been
+    // cut off by the page size before the guard could see them.
+    const possiblyTruncated = receivedFullPage && droppedOutsideFilters > 0;
+    const warnings = [];
+    if (unexpectedDrops > 0) {
+      warnings.push(
+        `The service returned ${unexpectedDrops} message${unexpectedDrops === 1 ? '' : 's'} outside the requested filters; ` +
+        `${unexpectedDrops === 1 ? 'it was' : 'they were'} removed, so the result may be smaller than the requested limit ` +
+        '(results possibly incomplete - narrow the date window or raise limit).'
+      );
+    }
+    if (possiblyTruncated) {
+      warnings.push(
+        `The service returned a full page of ${options.top} messages and ${droppedOutsideFilters} of them fell outside the requested filters, ` +
+        'so matching messages may have been cut off ' +
+        '(results possibly incomplete - narrow the date window or raise limit).'
+      );
     }
 
     const emails = messages.map(email => {
@@ -372,11 +407,7 @@ export async function searchEmailsTool(authManager, args) {
       totalResults: emails.length,
       droppedOutsideFilters,
       ...(kqlWindowWidened && { kqlWindowWidened: true }),
-      ...(unexpectedDrops > 0 && {
-        warning: `The service returned ${unexpectedDrops} message${unexpectedDrops === 1 ? '' : 's'} outside the requested filters; ` +
-          `${unexpectedDrops === 1 ? 'it was' : 'they were'} removed, so the result may be smaller than the requested limit ` +
-          '(results possibly incomplete - narrow the date window or raise limit).'
-      }),
+      ...(warnings.length > 0 && { warning: warnings.join(' ') }),
       includesFullBody: includeBody,
       limitWasCapped: limitWasCapped,
       optimization: useKQLSearch ? 'Using KQL for text-based search (efficient for content search)' :

@@ -188,7 +188,7 @@ describe('GraphApiClient failure log (stderr)', () => {
     error: { code: 'BadRequest', message: 'bad request body' }
   }));
 
-  it('includes method, full URL, redacted headers and the JSON body, and never the token', async () => {
+  it('includes method, full URL, redacted headers and a redacted body summary, and never the token', async () => {
     fake = failWith400();
     const body = { message: { subject: 'Quarterly summary', toRecipients: [{ emailAddress: { address: 'someone@example.com' } }] } };
 
@@ -200,7 +200,15 @@ describe('GraphApiClient failure log (stderr)', () => {
     expect(logged.url).toBe('https://graph.microsoft.com/v1.0/me/sendMail');
     expect(logged.headers.Authorization).toBe('[redacted]');
     expect(logged.headers['client-request-id']).toBe(fake.requests[0].headers.get('client-request-id'));
-    expect(logged.body).toBe(JSON.stringify(body));
+    // keys and value types/lengths only: no subject, no recipient address
+    expect(JSON.parse(logged.body)).toEqual({
+      message: {
+        subject: '<string, 17 chars>',
+        toRecipients: [{ emailAddress: { address: '<string, 19 chars>' } }]
+      }
+    });
+    expect(loggedText()).not.toContain('Quarterly summary');
+    expect(loggedText()).not.toContain('someone@example.com');
 
     // The token really went out on the wire, and appears nowhere in stderr or in the returned error
     expect(fake.requests[0].headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
@@ -221,18 +229,119 @@ describe('GraphApiClient failure log (stderr)', () => {
     expect(text).toContain('Failed request:');
   });
 
-  it.each(['POST', 'PATCH', 'PUT'])('truncates a long %s body to about 2,000 characters', async (method) => {
+  it.each(['POST', 'PATCH', 'PUT'])('logs a %s body as a redacted summary, never its content', async (method) => {
     fake = failWith400();
-    const body = { content: 'x'.repeat(5000) };
+    const body = {
+      subject: 'Statement for October',
+      importance: 'high',
+      isDraft: false,
+      count: 3,
+      nothing: null,
+      body: { contentType: 'HTML', content: 'x'.repeat(5000) },
+      toRecipients: [
+        { emailAddress: { address: 'first@example.com', name: 'First Person' } },
+        { emailAddress: { address: 'second@example.com' } }
+      ],
+      categories: []
+    };
 
     await client.makeRequest('/me/messages/m1', { body }, method);
 
     const logged = loggedRequest();
     expect(logged.method).toBe(method);
-    expect(logged.body.startsWith(JSON.stringify(body).slice(0, 2000))).toBe(true);
+    expect(JSON.parse(logged.body)).toEqual({
+      subject: '<string, 21 chars>',
+      importance: 'high',
+      isDraft: false,
+      count: 3,
+      nothing: null,
+      body: { contentType: 'HTML', content: '<string, 5000 chars>' },
+      toRecipients: [
+        { emailAddress: { address: '<string, 17 chars>', name: '<string, 12 chars>' } },
+        { emailAddress: { address: '<string, 18 chars>' } }
+      ],
+      categories: []
+    });
+    for (const secret of ['Statement for October', 'first@example.com', 'First Person', 'second@example.com', 'xxxxx']) {
+      expect(loggedText()).not.toContain(secret);
+    }
+  });
+
+  it('shows a string value longer than 80 characters only as its length, even under a benign key', () => {
+    const described = describeFailedRequest({}, {
+      method: 'POST',
+      path: '/me/sendMail',
+      body: { importance: 'i'.repeat(81), contentType: 'HTML' }
+    });
+    expect(JSON.parse(described.body)).toEqual({ importance: '<string, 81 chars>', contentType: 'HTML' });
+  });
+
+  it('replaces contentBytes and credential-named keys with [redacted] at any depth', () => {
+    const base64 = Buffer.alloc(3000, 7).toString('base64');
+    const described = describeFailedRequest({}, {
+      method: 'POST',
+      path: '/me/messages/m1/attachments',
+      body: {
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: 'Statement.pdf',
+        contentBytes: base64,
+        attachments: [{ contentBytes: base64, size: 3000 }],
+        nested: {
+          accessToken: 'tok-1', refresh_token: 'tok-2', clientSecret: 's-1', password: 'p-1',
+          apiKey: 'k-1', SigningKey: 'k-2', credentials: { user: 'u' }, Authorization: 'Bearer abc', oauthHeader: 'x'
+        }
+      }
+    });
+
+    const summary = JSON.parse(described.body);
+    expect(summary['@odata.type']).toBe('#microsoft.graph.fileAttachment');
+    expect(summary.name).toBe('<string, 13 chars>');
+    expect(summary.contentBytes).toBe('[redacted]');
+    expect(summary.attachments).toEqual([{ contentBytes: '[redacted]', size: 3000 }]);
+    expect(Object.keys(summary.nested)).toHaveLength(9);
+    for (const value of Object.values(summary.nested)) expect(value).toBe('[redacted]');
+    expect(described.body).not.toContain(base64.slice(0, 40));
+    for (const secret of ['tok-1', 'tok-2', 's-1', 'p-1', 'k-1', 'k-2', 'Bearer abc']) {
+      expect(described.body).not.toContain(secret);
+    }
+  });
+
+  it('caps the whole body summary at about 1,000 characters', async () => {
+    fake = failWith400();
+    const body = Object.fromEntries(Array.from({ length: 300 }, (_, n) => [`property${n}`, 'v']));
+
+    await client.makeRequest('/me/messages/m1', { body }, 'PATCH');
+
+    const logged = loggedRequest();
     expect(logged.body).toContain('truncated');
-    expect(logged.body).not.toContain('x'.repeat(2001));
-    expect(logged.body.length).toBeLessThan(2100);
+    expect(logged.body.startsWith('{"property0":')).toBe(true);
+    expect(logged.body.length).toBeLessThan(1100);
+    expect(logged.body).not.toContain('property299');
+  });
+
+  it('does not recurse forever into a self-referencing body', () => {
+    const body = { a: 1 };
+    body.self = body;
+    const described = describeFailedRequest({}, { method: 'POST', path: '/x', body });
+    expect(typeof described.body).toBe('string');
+    expect(described.body).toContain('"a":1');
+  });
+
+  it('summarises arrays by their first items and a count', () => {
+    const described = describeFailedRequest({}, {
+      method: 'POST',
+      path: '/x',
+      body: { requests: Array.from({ length: 12 }, (_, n) => ({ id: n })) }
+    });
+    const { requests } = JSON.parse(described.body);
+    expect(requests).toHaveLength(4);
+    expect(requests.slice(0, 3)).toEqual([{ id: 0 }, { id: 1 }, { id: 2 }]);
+    expect(requests[3]).toBe('<9 more items>');
+  });
+
+  it('summarises a non-object body by type', () => {
+    expect(describeFailedRequest({}, { method: 'PUT', path: '/x', body: 'secret text here' }).body)
+      .toBe('"<string, 16 chars>"');
   });
 
   it('logs the URL and headers of a GET but no body', async () => {
@@ -274,6 +383,40 @@ describe('GraphApiClient failure log (stderr)', () => {
       'X-Custom': '[redacted]'
     });
     expect(JSON.stringify(described)).not.toContain(TOKEN);
+  });
+
+  it('redacts every header whose name suggests auth, a key, a credential, a secret, a token, a cookie or a session', () => {
+    const request = {
+      _headers: {
+        'client-request-id': 'cid-1',
+        Prefer: 'outlook.timezone="UTC"',
+        'Content-Type': 'application/json',
+        'X-Auth': 'a1',
+        'X-Auth-Context': 'a2',
+        'Proxy-Authenticate': 'a3',
+        'X-Signing-Key': 'k1',
+        'Sec-WebSocket-Key': 'k2',
+        'X-Credential': 'c1',
+        'X-Credentials-Ref': 'c2',
+        'X-Client-Secret': 's1',
+        'X-Csrf-Token': 't1',
+        'Set-Cookie': 'sid=1',
+        'X-Session-Id': 'ss1',
+        'X-Custom': 'plain value'
+      },
+      buildFullUrl: () => 'https://graph.microsoft.com/v1.0/me/messages'
+    };
+
+    const { headers } = describeFailedRequest(request, { method: 'GET', path: '/me/messages' });
+
+    for (const name of ['X-Auth', 'X-Auth-Context', 'Proxy-Authenticate', 'X-Signing-Key', 'Sec-WebSocket-Key', 'X-Credential',
+      'X-Credentials-Ref', 'X-Client-Secret', 'X-Csrf-Token', 'Set-Cookie', 'X-Session-Id', 'Authorization']) {
+      expect(headers[name], name).toBe('[redacted]');
+    }
+    expect(headers['client-request-id']).toBe('cid-1');
+    expect(headers.Prefer).toBe('outlook.timezone="UTC"');
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers['X-Custom']).toBe('plain value');
   });
 
   it('describes a binary body by size instead of dumping it', () => {

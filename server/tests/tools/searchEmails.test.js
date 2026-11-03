@@ -474,3 +474,127 @@ describe('searchEmailsTool folder restrictions', () => {
     expect(result).toBe(failure);
   });
 });
+
+// A service that honours $top, like Graph does: it never returns more than the page size asked for.
+const pagedService = (pool) => (path, options) => ({ value: pool.slice(0, options.top) });
+
+describe('searchEmailsTool page size with a widened KQL window', () => {
+  const window = { startDate: '2026-10-01', endDate: '2026-10-31' };
+  const marginBefore = (n) => message(`margin-before-${n}`, '2026-09-30T12:00:00Z');
+  const marginAfter = (n) => message(`margin-after-${n}`, '2026-11-01T12:00:00Z');
+  const inWindow = (n) => message(`in-${n}`, `2026-10-${String(10 + n).padStart(2, '0')}T12:00:00Z`);
+
+  it('does not let margin-day messages use up the requested limit', async () => {
+    // The service hands back the margin days first
+    const pool = [marginBefore(1), marginAfter(1), inWindow(1), inWindow(2), inWindow(3), inWindow(4)];
+    const { payload } = await search({ query: 'receipt', limit: 3, ...window }, pagedService(pool));
+
+    expect(idsOf(payload)).toEqual(['in-1', 'in-2', 'in-3']);
+    expect(payload.searchSummary.totalResults).toBe(3);
+    expect(payload.searchSummary.droppedOutsideFilters).toBe(2);
+    // the service returned fewer messages than it was allowed to, so nothing was cut off
+    expect(payload.searchSummary.warning).toBeUndefined();
+  });
+
+  it.each([
+    [1, 26],
+    [3, 28],
+    [25, 50],
+    [100, 200],
+    [600, 1000],
+    [1000, 1000]
+  ])('requests more than limit %i (top %i) when the window is widened', async (limit, top) => {
+    const { options } = await search({ query: 'receipt', limit, ...window });
+    expect(options.top).toBe(top);
+  });
+
+  it('requests exactly the limit when nothing is widened', async () => {
+    const noDates = await search({ query: 'receipt', limit: 3 });
+    expect(noDates.options.top).toBe(3);
+
+    const odata = await search({ from: 'billing@vendor.example.com', limit: 3, ...window });
+    expect(odata.options.top).toBe(3);
+
+    const folder = await search({ query: 'receipt', folders: ['Receipts'], limit: 3, ...window });
+    expect(folder.options.top).toBe(3);
+  });
+
+  it('warns that results may be incomplete when a full page came back and some of it was dropped', async () => {
+    // Only margin-day messages fit in the page; in-window ones may sit behind them
+    const pool = [...Array.from({ length: 28 }, (_, n) => marginBefore(n)), inWindow(1), inWindow(2)];
+    const { options, payload } = await search({ query: 'receipt', limit: 3, ...window }, pagedService(pool));
+
+    expect(options.top).toBe(28);
+    expect(payload.emails).toEqual([]);
+    expect(payload.searchSummary.droppedOutsideFilters).toBe(28);
+    const { warning } = payload.searchSummary;
+    expect(warning).toContain('full page');
+    expect(warning).toContain('possibly incomplete');
+    expect(warning).toMatch(/narrow the date window or raise limit/);
+  });
+
+  it('does not warn about a full page when nothing was dropped', async () => {
+    const pool = Array.from({ length: 30 }, (_, n) => message(`in-${n}`, '2026-10-15T12:00:00Z'));
+    const { payload } = await search({ query: 'receipt', limit: 3, ...window }, pagedService(pool));
+
+    // 28 fetched (a full page), all inside the window, trimmed to the limit
+    expect(payload.searchSummary.droppedOutsideFilters).toBe(0);
+    expect(idsOf(payload)).toEqual(['in-0', 'in-1', 'in-2']);
+    expect(payload.searchSummary.warning).toBeUndefined();
+  });
+
+  it('keeps the unexplained-drops warning and adds the page note when both apply', async () => {
+    const pool = [
+      ...Array.from({ length: 27 }, (_, n) => marginAfter(n)),
+      message('way-out', '2026-01-15T12:00:00Z'),
+      inWindow(1)
+    ];
+    const { payload } = await search({ query: 'receipt', limit: 3, ...window }, pagedService(pool));
+
+    const { warning } = payload.searchSummary;
+    expect(warning).toContain('returned 1 message outside the requested filters');
+    expect(warning).toContain('full page');
+  });
+});
+
+describe('searchEmailsTool trims to the limit', () => {
+  it('trims a single-endpoint KQL result to the limit even if the service returns more', async () => {
+    const value = Array.from({ length: 8 }, (_, n) => message(`m-${n}`, '2026-10-15T12:00:00Z'));
+    const { payload } = await search({ query: 'receipt', limit: 3 }, () => ({ value }));
+    expect(idsOf(payload)).toEqual(['m-0', 'm-1', 'm-2']);
+    expect(payload.searchSummary.totalResults).toBe(3);
+  });
+
+  it('trims a single-endpoint $filter result to the limit even if the service returns more', async () => {
+    const value = Array.from({ length: 8 }, (_, n) => message(`m-${n}`, '2026-10-15T12:00:00Z'));
+    const { payload } = await search({ from: 'billing@vendor.example.com', limit: 3 }, () => ({ value }));
+    expect(idsOf(payload)).toEqual(['m-0', 'm-1', 'm-2']);
+  });
+
+  it('keeps the first in-window messages when a widened window returns extra margin-day messages', async () => {
+    const value = [
+      message('a', '2026-10-05T12:00:00Z'),
+      message('margin', '2026-11-01T12:00:00Z'),
+      message('b', '2026-10-06T12:00:00Z'),
+      message('c', '2026-10-07T12:00:00Z'),
+      message('d', '2026-10-08T12:00:00Z')
+    ];
+    const { payload } = await search(
+      { query: 'receipt', limit: 3, startDate: '2026-10-01', endDate: '2026-10-31' },
+      () => ({ value })
+    );
+    expect(idsOf(payload)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('still trims a multi-folder merge to the limit', async () => {
+    const byPath = {
+      '/me/mailFolders/Receipts/messages': [message('r1', '2026-10-03T00:00:00Z'), message('r2', '2026-10-20T00:00:00Z')],
+      '/me/mailFolders/Invoices/messages': [message('i1', '2026-10-10T00:00:00Z'), message('i2', '2026-10-25T00:00:00Z')]
+    };
+    const { payload } = await search(
+      { query: 'receipt', folders: ['Receipts', 'Invoices'], limit: 3 },
+      (path) => ({ value: byPath[path] || [] })
+    );
+    expect(idsOf(payload)).toEqual(['i2', 'r2', 'i1']);
+  });
+});

@@ -96,20 +96,58 @@ function describeRequestUrl(request, fallback) {
   return fallback;
 }
 
-const REQUEST_BODY_LOG_LIMIT = 2000;
+const REQUEST_BODY_LOG_LIMIT = 1000;
 const REDACTED = '[redacted]';
 const BODY_METHODS = new Set(['POST', 'PATCH', 'PUT']);
 // Header names that carry credentials; a value that looks like a scheme + credential is covered too.
-const SENSITIVE_HEADER_NAME = /authori[sz]ation|cookie|token|secret|password|api[-_]?key|session/i;
+const SENSITIVE_HEADER_NAME = /auth|key|credential|secret|token|cookie|session/i;
 const CREDENTIAL_VALUE = /^\s*(?:bearer|basic)\s/i;
+// Body keys whose value is never logged (attachment bytes, anything credential-like).
+const SENSITIVE_BODY_KEY = /^contentBytes$|token|secret|password|key|credential|auth/i;
+// Short strings under these keys are protocol enumerations, not user content, and stay readable.
+const LITERAL_STRING_KEYS = new Set(['@odata.type', 'contentType', 'importance', 'sensitivity', 'showAs', 'type']);
+const LITERAL_STRING_MAX = 80;
+const BODY_SUMMARY_MAX_DEPTH = 6;
+const BODY_SUMMARY_ARRAY_ITEMS = 3;
 
 function truncateForLog(value, limit = REQUEST_BODY_LOG_LIMIT) {
   return value.length > limit ? `${value.slice(0, limit)}... [truncated, ${value.length} chars total]` : value;
 }
 
 /**
+ * A request body reduced to what is safe to write to a log: the JSON keys and
+ * the type/length of each value, never user content. Strings (recipients,
+ * subjects, mail text, base64) appear as "<string, N chars>"; only short values
+ * under a few protocol-enumeration keys (contentType, importance, ...) are shown
+ * as-is. contentBytes and credential-named keys are "[redacted]".
+ */
+function summariseBodyValue(value, key, depth) {
+  if (key !== undefined && SENSITIVE_BODY_KEY.test(key)) return REDACTED;
+  if (typeof value === 'string') {
+    return LITERAL_STRING_KEYS.has(key) && value.length <= LITERAL_STRING_MAX ? value : `<string, ${value.length} chars>`;
+  }
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    if (depth >= BODY_SUMMARY_MAX_DEPTH) return `<array, ${value.length} items>`;
+    const items = value.slice(0, BODY_SUMMARY_ARRAY_ITEMS).map(item => summariseBodyValue(item, undefined, depth + 1));
+    if (value.length > BODY_SUMMARY_ARRAY_ITEMS) items.push(`<${value.length - BODY_SUMMARY_ARRAY_ITEMS} more items>`);
+    return items;
+  }
+  if (typeof value === 'object') {
+    if (depth >= BODY_SUMMARY_MAX_DEPTH) return '<object>';
+    return Object.fromEntries(Object.entries(value).map(([name, inner]) => [name, summariseBodyValue(inner, name, depth + 1)]));
+  }
+  return `<${typeof value}>`;
+}
+
+function summariseBodyForLog(body) {
+  return truncateForLog(JSON.stringify(summariseBodyValue(body ?? {}, undefined, 0)));
+}
+
+/**
  * The request as it should appear in a failure log: method, full URL, headers
- * and (for POST/PATCH/PUT) the JSON body cut to ~2,000 characters. Credential
+ * and (for POST/PATCH/PUT) a redacted summary of the JSON body (keys and value
+ * types/lengths, at most ~1,000 characters; see summariseBodyValue). Credential
  * headers are shown as "[redacted]" and the token is never read. The SDK adds
  * Authorization when the request is sent, so it is listed explicitly (redacted)
  * rather than looked up.
@@ -129,14 +167,11 @@ export function describeFailedRequest(request, { method, path, body } = {}) {
     if (Buffer.isBuffer(body) || body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
       described.body = `[binary body, ${body.byteLength} bytes]`;
     } else {
-      let serialised;
       try {
-        // safeStringify also redacts secret-named keys inside the body
-        serialised = safeStringify(body ?? {}, 0);
+        described.body = summariseBodyForLog(body);
       } catch {
-        serialised = null;
+        described.body = '[body could not be summarised]';
       }
-      described.body = typeof serialised === 'string' ? truncateForLog(serialised) : '[body could not be serialised]';
     }
   }
   return described;
