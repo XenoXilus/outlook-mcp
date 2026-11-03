@@ -90,7 +90,7 @@ export const collectReceiptsSchema = {
           properties: {
             vendor: { type: 'string', description: 'Vendor label used in filenames and the manifest, e.g. "Acme"' },
             from: { type: 'string', description: 'Sender email to match, e.g. billing@acme.example' },
-            subjectContains: { type: 'string', description: 'Substring the subject must contain (Re:/Fw: prefixes are ignored)' },
+            subjectContains: { type: 'string', description: 'Subject substring (Re:/Fw: prefixes are ignored). A message matching either this or `from` is a candidate for the rule' },
             productContains: {
               oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
               description: 'Only receipts for these products: at least one term must appear (case-insensitive substring) in the receipt\'s product label or a line-item description. Use with productExcludes to split one sender into several vendors. A rule with productContains wins over a rule without product matchers; a receipt whose product cannot be determined is reported as ambiguous, never guessed.'

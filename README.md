@@ -179,7 +179,7 @@ capture product labels, point `RECEIPT_RULES_PATH` at a JSON file
 (see [`receipt-rules.example.json`](receipt-rules.example.json)):
 
 - `vendorSenders`: `[{ "pattern": "<case-insensitive regex on the from address>", "vendor": "<name>" }]` — checked before the subject heuristic.
-- `productLabels`: `["<case-insensitive regex>", ...]` — first match becomes `productLabel`; without rules it is `null`.
+- `productLabels`: `["<case-insensitive regex>", ...]` — first match becomes `productLabel`; without a match it falls back to the line-item descriptions (see [Extracted fields](#extracted-fields)).
 
 ### Receipt & Invoice Tools
 
@@ -238,7 +238,7 @@ A vendor rule passed to `outlook_collect_receipts` may also carry `productContai
 
 Besides vendor, `productLabel` and `attachmentIds`, `outlook_extract_receipt` returns:
 
-- `amounts` — `{ subtotal, tax, credits, total, amountPaid, currency, source }`. `amount` is the gross total charged (not the pre-tax subtotal) and `taxAmount` the tax sum. Credit and discount lines are summed; currency prefixes such as `CA$`, `A$`/`AU$`, `NZ$`, `US$`, `HK$` and ISO codes are recognised.
+- `amounts` — `{ subtotal, tax, credits, total, amountPaid, currency, source, totalLabel }` (`totalLabel` says which row gave the total — `amount paid`, `total` or `amount due` — and is `null` when it had to be guessed). `amount` is the gross total charged (not the pre-tax subtotal) and `taxAmount` the tax sum. Credit and discount lines are summed; currency prefixes such as `CA$`, `A$`/`AU$`, `NZ$`, `US$`, `HK$` and ISO codes are recognised.
 - `lineItems[]` — `{ description, quantity, amount }`. `productLabel` falls back to their descriptions when no configured `productLabels` pattern matches.
 - `receiptNumber`, `invoiceNumber` (also read from an `Invoice-<CODE>-<NNNN>.pdf` attachment name) and `orderNumber`.
 - Reply/forward handling: `normalisedSubject` (`Re:`/`Fw:` stripped), `replyOrForward` and `quotedFrom` (`{ name, address }` of the innermost quoted `From:` header).
